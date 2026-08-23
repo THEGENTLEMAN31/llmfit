@@ -16,7 +16,7 @@
 
 use std::collections::BTreeMap;
 use std::fs::File;
-use std::io::{BufReader, Read};
+use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
@@ -25,7 +25,6 @@ pub const GGUF_MAGIC: u32 = 0x4655_4747; // "GGUF" little-endian
 
 const MAX_STRING_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_DIMS: usize = 16;
-const SCRATCH_SKIP_BYTES: usize = 8192;
 
 /// ggml tensor element types (`ggml.h` enum values).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -387,11 +386,11 @@ pub struct GgufHeader {
     pub tensors: Vec<GgufTensorInfo>,
 }
 
-struct Reader<R: Read> {
+struct Reader<R: Read + Seek> {
     inner: R,
 }
 
-impl<R: Read> Reader<R> {
+impl<R: Read + Seek> Reader<R> {
     fn read_exact(&mut self, buf: &mut [u8]) -> Result<(), String> {
         self.inner
             .read_exact(buf)
@@ -442,18 +441,15 @@ impl<R: Read> Reader<R> {
         Ok(f64::from_bits(self.read_u64()?))
     }
 
-    /// Consume `n` bytes without storing them (bounded scratch buffer, no
-    /// seeks — keeps the parser usable over non-seekable streams).
+    /// Consume `n` bytes without storing them. Seeks forward instead of
+    /// reading through: over a range-request stream this keeps skipped
+    /// metadata (tokenizer arrays) off the wire entirely.
     fn skip(&mut self, n: u64) -> Result<(), String> {
-        let mut remaining = n;
-        let mut scratch = [0u8; SCRATCH_SKIP_BYTES];
-        while remaining > 0 {
-            let chunk = remaining.min(SCRATCH_SKIP_BYTES as u64) as usize;
-            self.inner
-                .read_exact(&mut scratch[..chunk])
-                .map_err(|e| format!("truncated GGUF header: {e}"))?;
-            remaining -= chunk as u64;
-        }
+        self.inner
+            .seek(SeekFrom::Current(n.try_into().map_err(|_| {
+                format!("skip of {} bytes overflows offset", n)
+            })?))
+            .map_err(|e| format!("cannot skip {n} bytes in GGUF header: {e}"))?;
         Ok(())
     }
 
@@ -526,9 +522,11 @@ impl<R: Read> Reader<R> {
 }
 
 impl GgufHeader {
-    /// Parse a header from any blocking reader. The reader must be positioned
-    /// at offset 0 of a GGUF stream.
-    pub fn read_from<R: Read>(reader: R) -> Result<Self, String> {
+    /// Parse a header from any seekable blocking reader. The reader must be
+    /// positioned at offset 0 of a GGUF stream. Skipped payloads (array
+    /// bodies) are jumped over via `Seek`, which keeps them off the wire when
+    /// the reader is backed by HTTP range requests (`crate::remote`).
+    pub fn read_from<R: Read + Seek>(reader: R) -> Result<Self, String> {
         let mut r = Reader { inner: reader };
 
         let magic = r.read_u32()?;

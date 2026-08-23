@@ -412,38 +412,54 @@ AGENT USAGE:
         model: String,
     },
 
-    /// Inspect a local GGUF file by parsing its header (no model load)
+    /// Inspect a GGUF header from a local file or a HuggingFace repo (range requests, no weight download)
     #[command(long_about = "\
-Inspect a local GGUF file by parsing its header directly.
+Inspect a GGUF header by parsing it directly — never loading tensor data.
+
+Accepts three forms of PATH:
+  - a local file path (parsed straight from disk),
+  - an HF repo id 'owner/repo' (the GGUF file matching --quant, or the best
+    quality candidate otherwise, is located via the HF tree API and its
+    header is read over HTTP range requests — at most ~4 MiB transferred,
+    weights are NEVER downloaded),
+  - a full https:// URL pointing at a .gguf file.
 
 Reports architecture parameters read from the real metadata keys, the exact
 per-tensor quantization mix with weight byte counts, expert configuration,
 RoPE/YaRN/sliding-window settings, and KV cache estimates at several context
 lengths. Tensor data is never read: auditing a multi-GB file costs a few KB.
 
-For sharded files, run on the first shard (it carries the header metadata).
+For sharded files, the first shard carries the header metadata (audit reads
+only that shard).
 
 PRECONDITIONS:
-  FILE must be a readable GGUF file (magic 'GGUF', version 1-3).
+  - local form: FILE must be a readable GGUF file (magic 'GGUF', version 1-3)
+  - remote forms: network access to huggingface.co (or the URL host)
 
 SIDE EFFECTS:
-  None — read-only.
+  None — read-only. Network form performs GET range requests only.
 
 EXIT CODES:
   0  Success
-  1  File unreadable or not a valid GGUF header
+  1  File unreadable / not a valid GGUF header / network failure
 
 AGENT USAGE:
   llmfit audit ./model-Q4_K_M.gguf --json
+  llmfit audit bartowski/Llama-3.2-1B-Instruct-GGUF --quant Q4_K_M
+  llmfit audit unsloth/Qwen3-235B-A22B-GGUF --json
 
-  JSON output fields: { file: { path, size_bytes }, summary: { architecture,
+  JSON output fields: { file: { ... }, summary: { architecture,
   block_count, attention_heads, key_value_heads, context_length,
   expert_count, expert_used_count, kv_lora_rank, total_parameters,
   active_parameters, weights_bytes, quant_mix: [{ label, bytes, share }],
-  layer_quants: [{ first_block, last_block, attention, ffn }], ... } }")]
+  layer_quants: [{ first_block, last_block, attention, ffn }], ... } }. For
+  remote audits, file also carries url and transferred_header_bytes.")]
     Audit {
-        /// Path to the .gguf file to inspect
+        /// Path to a .gguf file, an HF repo id (owner/repo), or an https:// URL
         path: String,
+        /// Quant variant to select when auditing an HF repo id (e.g. Q4_K_M)
+        #[arg(short, long)]
+        quant: Option<String>,
     },
 
     /// Compare two models side-by-side, or auto-compare top N filtered models
@@ -2039,13 +2055,55 @@ fn run_model(model: &str, server: bool, port: u16, ngl: i32, ctx_size: u32) {
     }
 }
 
-fn run_audit(path: &str, json: bool) -> Result<(), String> {
-    let file = llmfit_core::gguf::GgufFile::open(std::path::Path::new(path))?;
-    let summary = llmfit_core::gguf::GgufModelSummary::from_header(&file.header);
-    if json {
-        display::display_json_gguf_audit(&file, &summary);
+fn run_audit(path: &str, quant: Option<&str>, json: bool) -> Result<(), String> {
+    use display::{FileSection, GgufAuditView};
+    use llmfit_core::remote;
+
+    let view = if std::path::Path::new(path).exists() {
+        let file = llmfit_core::gguf::GgufFile::open(std::path::Path::new(path))?;
+        let summary = llmfit_core::gguf::GgufModelSummary::from_header(&file.header);
+        GgufAuditView {
+            file_section: FileSection::Local {
+                path: file.path.display().to_string(),
+                size_bytes: file.file_size_bytes,
+            },
+            summary,
+        }
     } else {
-        display::display_gguf_audit(&file, &summary);
+        let is_url = path.starts_with("http://") || path.starts_with("https://");
+        let looks_like_repo = !is_url
+            && !path.starts_with('.')
+            && !path.starts_with('/')
+            && !path.contains('\\')
+            && path.contains('/');
+        let (repo_file, url, advertised) = if is_url {
+            (path.to_string(), path.to_string(), None)
+        } else if looks_like_repo {
+            let (filename, url, size) = remote::resolve_repo_gguf_url(path, quant)?;
+            eprintln!("selected {filename} from {path}");
+            (format!("{path} :: {filename}"), url, Some(size))
+        } else {
+            return Err(format!(
+                "cannot open '{path}': no such file. For a remote audit pass an HF repo id (owner/repo) or an https:// URL."
+            ));
+        };
+        let remote_gguf = remote::open_remote_gguf(&url)?;
+        let summary = remote_gguf.summarize();
+        GgufAuditView {
+            file_section: FileSection::Remote {
+                repo_file,
+                url,
+                advertised_bytes: advertised.or(remote_gguf.file_size_bytes),
+                transferred_header_bytes: remote_gguf.transferred_bytes,
+            },
+            summary,
+        }
+    };
+
+    if json {
+        display::display_json_gguf_audit(&view);
+    } else {
+        display::display_gguf_audit(&view);
     }
     Ok(())
 }
@@ -2994,7 +3052,7 @@ fn main() {
                 }
             }
 
-            Commands::Audit { path } => match run_audit(&path, cli.json) {
+            Commands::Audit { path, quant } => match run_audit(&path, quant.as_deref(), cli.json) {
                 Ok(()) => {}
                 Err(err) => {
                     eprintln!("Error: {}", err);

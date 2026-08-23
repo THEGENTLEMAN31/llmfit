@@ -955,22 +955,121 @@ fn gib(bytes: u64) -> f64 {
     bytes as f64 / (1024.0 * 1024.0 * 1024.0)
 }
 
-/// Render the audit of one GGUF file as aligned text sections.
-pub fn display_gguf_audit(file: &llmfit_core::gguf::GgufFile, s: &GgufModelSummary) {
-    let title = s.model_name.clone().unwrap_or_else(|| {
-        file.path
+/// Where the audited header came from — drives the "File:" section.
+#[derive(Debug, Clone)]
+pub enum FileSection {
+    Local {
+        path: String,
+        size_bytes: u64,
+    },
+    Remote {
+        repo_file: String,
+        url: String,
+        advertised_bytes: Option<u64>,
+        transferred_header_bytes: u64,
+    },
+}
+
+/// Everything the audit renderers need, independent of transport.
+#[derive(Debug)]
+pub struct GgufAuditView {
+    pub file_section: FileSection,
+    pub summary: GgufModelSummary,
+}
+
+/// Detect `-00001-of-00009` style shard suffixes; returns (index, count).
+fn shard_info(filename: &str) -> Option<(u32, u32)> {
+    let lower = filename.to_ascii_lowercase();
+    let pos = lower.rfind("-of-")?;
+    // Walk backwards over the digit run, then restore reading order.
+    let index: u32 = lower[..pos]
+        .chars()
+        .rev()
+        .take_while(char::is_ascii_digit)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect::<String>()
+        .parse()
+        .ok()?;
+    let rest = &lower[pos + 4..];
+    let count: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    let count = count.parse().ok()?;
+    (index <= count && count > 1).then_some((index, count))
+}
+
+/// Shard JSON payload (null when the file is not a shard).
+fn shard_from_path(filename: &str) -> serde_json::Value {
+    match shard_info(filename) {
+        Some((index, count)) => serde_json::json!({ "index": index, "count": count }),
+        None => serde_json::Value::Null,
+    }
+}
+
+fn audit_title(s: &GgufModelSummary, fallback: &str) -> String {
+    s.model_name.clone().unwrap_or_else(|| fallback.to_string())
+}
+
+/// Render the audit of one GGUF header as aligned text sections.
+pub fn display_gguf_audit(view: &GgufAuditView) {
+    let s = &view.summary;
+    let fallback = match &view.file_section {
+        FileSection::Local { path, .. } => std::path::Path::new(path)
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default()
-    });
+            .unwrap_or_default(),
+        FileSection::Remote { repo_file, .. } => repo_file.clone(),
+    };
+    let title = audit_title(s, &fallback);
     println!(
         "\n{}",
         format!("=== {} (GGUF audit) ===", title).bold().cyan()
     );
 
     println!("{}", "File:".bold().underline());
-    println!("  Path: {}", file.path.display());
-    println!("  Size: {:.2} GiB", gib(file.file_size_bytes));
+    match &view.file_section {
+        FileSection::Local { path, size_bytes } => {
+            println!("  Path: {}", path);
+            println!("  Size: {:.2} GiB", gib(*size_bytes));
+        }
+        FileSection::Remote {
+            repo_file,
+            url,
+            advertised_bytes,
+            transferred_header_bytes,
+        } => {
+            let is_repo_form = repo_file.contains(" :: ");
+            if is_repo_form {
+                println!("  Repo file: {}", repo_file);
+            }
+            println!("  URL: {}", url);
+            if let Some(size) = advertised_bytes {
+                println!("  Size (advertised): {:.2} GiB", gib(*size));
+            }
+            println!(
+                "  Header transfer: {} KiB over range requests (weights untouched)",
+                (*transferred_header_bytes as f64 / 1024.0).round()
+            );
+        }
+    }
+    let audited_name = match &view.file_section {
+        FileSection::Local { path, .. } => std::path::Path::new(path)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        FileSection::Remote { repo_file, .. } => repo_file
+            .rsplit("::")
+            .next()
+            .unwrap_or(repo_file)
+            .trim()
+            .to_string(),
+    };
+    if let Some((index, count)) = shard_info(&audited_name) {
+        println!(
+            "  {} Sharded model ({index}/{count}): totals cover this shard only.",
+            "NOTE".yellow().bold()
+        );
+    }
     println!("  GGUF version: {}", s.gguf_version);
     println!("  Tensors: {}", s.tensor_count);
 
@@ -1143,13 +1242,29 @@ fn format_block_range(first: u32, last: u32) -> String {
 }
 
 /// Serialize the audit as JSON to stdout.
-pub fn display_json_gguf_audit(file: &llmfit_core::gguf::GgufFile, summary: &GgufModelSummary) {
+pub fn display_json_gguf_audit(view: &GgufAuditView) {
+    let file = match &view.file_section {
+        FileSection::Local { path, size_bytes } => serde_json::json!({
+            "path": path,
+            "size_bytes": size_bytes,
+            "shard": shard_from_path(path),
+        }),
+        FileSection::Remote {
+            repo_file,
+            url,
+            advertised_bytes,
+            transferred_header_bytes,
+        } => serde_json::json!({
+            "repo_file": repo_file,
+            "url": url,
+            "size_bytes": advertised_bytes,
+            "transferred_header_bytes": transferred_header_bytes,
+            "shard": shard_from_path(repo_file.rsplit("::").next().unwrap_or(repo_file).trim()),
+        }),
+    };
     let payload = serde_json::json!({
-        "file": {
-            "path": file.path.display().to_string(),
-            "size_bytes": file.file_size_bytes,
-        },
-        "summary": summary,
+        "file": file,
+        "summary": view.summary,
     });
     println!(
         "{}",
@@ -1414,5 +1529,21 @@ mod tests {
 
         assert_eq!(json["context_length"], 131_072);
         assert_eq!(json["effective_context_length"], 8_192);
+    }
+}
+
+#[cfg(test)]
+mod gguf_shard_tests {
+    use super::shard_info;
+
+    #[test]
+    fn detects_standard_gguf_shard_suffixes() {
+        assert_eq!(
+            shard_info("Qwen3-235B-A22B-Q8_0-00001-of-00009.gguf"),
+            Some((1, 9))
+        );
+        assert_eq!(shard_info("/path/model-00003-of-00003.GGUF"), Some((3, 3)));
+        assert_eq!(shard_info("plain-model-Q4_K_M.gguf"), None);
+        assert_eq!(shard_info("weird-of-nine.gguf"), None);
     }
 }

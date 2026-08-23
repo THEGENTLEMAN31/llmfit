@@ -10,6 +10,7 @@ pub mod models;
 pub mod plan;
 pub mod providers;
 pub mod quality;
+pub mod remote;
 pub mod share;
 pub mod task_bench;
 pub mod update;
