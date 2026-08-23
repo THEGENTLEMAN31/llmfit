@@ -427,6 +427,29 @@ pub struct MeasuredTps {
     pub hardware_label: String,
     #[serde(default)]
     pub source: MeasuredSource,
+    /// 10th percentile of the underlying samples (community source only;
+    /// equals `tok_s` otherwise). Serde-defaulted so older local caches
+    /// recorded before this field keep loading.
+    #[serde(default)]
+    pub p10: f64,
+    /// 90th percentile of the underlying samples (see `p10`).
+    #[serde(default)]
+    pub p90: f64,
+}
+
+/// Linearly-interpolated percentile of a SORTED sample vector.
+fn sorted_percentile(sorted: &[f64], q: f64) -> f64 {
+    debug_assert!((0.0..=1.0).contains(&q));
+    match sorted.len() {
+        0 => 0.0,
+        1 => sorted[0],
+        n => {
+            let pos = q * (n - 1) as f64;
+            let lo = pos.floor() as usize;
+            let hi = pos.ceil() as usize;
+            sorted[lo] + (sorted[hi] - sorted[lo]) * (pos - lo as f64)
+        }
+    }
 }
 
 /// Find the embedded-cache hardware preset matching the detected GPU.
@@ -515,6 +538,8 @@ impl MeasuredTpsIndex {
             sample_count: n as u32,
             hardware_label: self.hardware_label.to_string(),
             source: MeasuredSource::Community,
+            p10: sorted_percentile(s, 0.10),
+            p90: sorted_percentile(s, 0.90),
         })
     }
 }
@@ -637,6 +662,8 @@ impl CommunityBenchIndex {
             sample_count: n as u32,
             hardware_label: "identical hardware".to_string(),
             source: MeasuredSource::CommunityLlmfit,
+            p10: sorted_percentile(&matches, 0.10),
+            p90: sorted_percentile(&matches, 0.90),
         })
     }
 }

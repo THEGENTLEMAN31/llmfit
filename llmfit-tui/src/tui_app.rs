@@ -1272,6 +1272,7 @@ impl App {
                             .as_ref()
                             .and_then(|idx| idx.lookup(&m.name, &fit.best_quant))
                     });
+                fit.set_tps_range();
                 fit
             })
             .collect();
@@ -2633,6 +2634,7 @@ impl App {
             for fit in &mut self.all_fits {
                 if let Some(m) = idx.lookup(&fit.model.name) {
                     fit.measured_tps = Some(m);
+                    fit.set_tps_range();
                 }
             }
         }
@@ -3732,6 +3734,7 @@ impl App {
                 fit.measured_tps = measured_index
                     .as_ref()
                     .and_then(|idx| idx.lookup(&m.name, &fit.best_quant));
+                fit.set_tps_range();
                 fit
             })
             .collect();
@@ -4182,6 +4185,7 @@ impl App {
                 fit.measured_tps = measured_index
                     .as_ref()
                     .and_then(|idx| idx.lookup(&m.name, &fit.best_quant));
+                fit.set_tps_range();
                 fit
             })
             .collect();
@@ -5274,6 +5278,7 @@ mod tests {
             usable_context: 8192,
             estimate_basis: Default::default(),
             measured_tps: None,
+            tps_range: None,
         }
     }
 

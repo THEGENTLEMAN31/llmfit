@@ -22,6 +22,8 @@ struct ModelRow {
     score: String,
     #[tabled(rename = "tok/s est.")]
     tps: String,
+    #[tabled(rename = "tok/s range")]
+    tps_range: String,
     #[tabled(rename = "Quant")]
     quant: String,
     #[tabled(rename = "Runtime")]
@@ -84,6 +86,7 @@ pub fn display_all_models(models: &[LlmModel], sort: SortColumn) {
             size: m.parameter_count.clone(),
             score: "-".to_string(),
             tps: "-".to_string(),
+            tps_range: "-".to_string(),
             quant: m.quantization.clone(),
             runtime: "-".to_string(),
             mode: "-".to_string(),
@@ -128,6 +131,13 @@ pub fn display_model_fits(fits: &[ModelFit]) {
                     Some(m) => format!("{:.1} ✓", m.tok_s),
                     None => format!("{:.1}", fit.estimated_tps),
                 },
+                // V0-incertitude: the interval rides along in its own column
+                // so no throughput is ever shown as a bare point value.
+                tps_range: fit
+                    .tps_range
+                    .as_ref()
+                    .map(|r| r.compact())
+                    .unwrap_or_else(|| "\u{2014}".to_string()),
                 quant: fit.best_quant.clone(),
                 runtime: fit.runtime_text().to_string(),
                 mode: fit.run_mode_text().to_string(),
@@ -195,6 +205,19 @@ pub fn display_model_detail(fit: &ModelFit) {
         fit.score_components.context
     );
     println!("  Baseline Est. Speed: {:.1} tok/s", fit.estimated_tps);
+    match &fit.tps_range {
+        Some(r) => println!(
+            "  Expected range: {} ({})",
+            r,
+            match r.source {
+                llmfit_core::fit::TpsRangeSource::CommunitySamples => {
+                    "community p10–p90"
+                }
+                llmfit_core::fit::TpsRangeSource::EmpiricalBand => "±25% empirical band",
+            }
+        ),
+        None => println!("  Expected range: n/a"),
+    }
     println!();
 
     display_estimate_basis(fit);
@@ -468,6 +491,7 @@ pub fn display_search_results(models: &[&LlmModel], query: &str) {
             size: m.parameter_count.clone(),
             score: "-".to_string(),
             tps: "-".to_string(),
+            tps_range: "-".to_string(),
             quant: m.quantization.clone(),
             runtime: "-".to_string(),
             mode: "-".to_string(),
@@ -1060,6 +1084,7 @@ mod tests {
             usable_context: 8_192,
             estimate_basis: Default::default(),
             measured_tps: None,
+            tps_range: None,
         }
     }
 

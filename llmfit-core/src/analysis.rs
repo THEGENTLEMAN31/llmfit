@@ -192,6 +192,7 @@ pub fn build_model_fits(
                         .as_ref()
                         .and_then(|idx| idx.lookup(&m.name, &fit.best_quant))
                 });
+            fit.set_tps_range();
             fit
         })
         .collect();

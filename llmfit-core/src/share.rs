@@ -485,6 +485,8 @@ impl LocalBenchIndex {
             sample_count: matches.len() as u32,
             hardware_label: "this machine".to_string(),
             source: crate::benchmarks::MeasuredSource::LocalBench,
+            p10: *matches.first()?,
+            p90: *matches.first()?,
         })
     }
 }

@@ -78,6 +78,18 @@ pub fn fit_to_json(fit: &ModelFit) -> serde_json::Value {
         "estimate_basis": fit.estimate_basis,
         "verify_command": generate_llamabench_command(fit),
         "measured_tps": fit.measured_tps,
+        // V0-incertitude: every throughput payload carries its interval.
+        "tps_range": fit.tps_range.as_ref().map(|r| {
+            let source = match r.source {
+                llmfit_core::fit::TpsRangeSource::CommunitySamples => "community_p10_p90",
+                llmfit_core::fit::TpsRangeSource::EmpiricalBand => "empirical_plus_minus_25pct",
+            };
+            let mut obj = serde_json::Map::new();
+            obj.insert("low".into(), serde_json::json!(round1(r.low)));
+            obj.insert("high".into(), serde_json::json!(round1(r.high)));
+            obj.insert("source".into(), serde_json::json!(source));
+            serde_json::Value::Object(obj)
+        }),
     })
 }
 

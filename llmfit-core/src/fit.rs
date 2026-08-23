@@ -264,9 +264,65 @@ pub struct ModelFit {
     /// with priority over `estimated_tps`. Set after analysis, like
     /// `installed`.
     pub measured_tps: Option<crate::benchmarks::MeasuredTps>,
+    /// Interval accompanying the DISPLAYED throughput. A single-point tok/s
+    /// is never shown without it (fork audit V0-incertitude): community
+    /// p10–p90 when enough comparable runs exist, otherwise an empirical
+    /// ±25 % band around the estimate.
+    pub tps_range: Option<TpsRange>,
+}
+
+/// Where a throughput interval comes from, and therefore how much to trust it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum TpsRangeSource {
+    /// Interquartile-style spread of ≥3 community runs on matching hardware.
+    CommunitySamples,
+    /// Documented empirical band (±25 %) around a formula estimate — the
+    /// formula's own calibration residual (est/measured medians 0.67–1.19
+    /// per preset, 2026-07 cache).
+    EmpiricalBand,
+}
+
+/// A tok/s interval: `low`–`high`, always displayed alongside the point value.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct TpsRange {
+    pub low: f64,
+    pub high: f64,
+    pub source: TpsRangeSource,
+}
+
+impl TpsRange {
+    /// The documented fallback band around any single-point estimate.
+    pub const EMPIRICAL_FRACTION: f64 = 0.25;
+
+    pub fn empirical(point: f64) -> Self {
+        Self {
+            low: point * (1.0 - Self::EMPIRICAL_FRACTION),
+            high: point * (1.0 + Self::EMPIRICAL_FRACTION),
+            source: TpsRangeSource::EmpiricalBand,
+        }
+    }
+
+    /// "11–14" (compact, unit supplied by the surrounding label).
+    pub fn compact(&self) -> String {
+        format!("{:.0}–{:.0}", self.low, self.high)
+    }
+}
+
+impl std::fmt::Display for TpsRange {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:.1}–{:.1} tok/s", self.low, self.high)
+    }
 }
 
 impl ModelFit {
+    /// The throughput value the interfaces display: measured ground truth
+    /// when available, else the formula estimate.
+    pub fn displayed_tps(&self) -> f64 {
+        self.measured_tps
+            .as_ref()
+            .map(|m| m.tok_s)
+            .unwrap_or(self.estimated_tps)
+    }
     pub fn analyze(model: &LlmModel, system: &SystemSpecs) -> Self {
         Self::analyze_with_context_limit(model, system, None)
     }
@@ -373,6 +429,7 @@ impl ModelFit {
                     ..EstimateBasis::default()
                 },
                 measured_tps: None,
+                tps_range: None,
             };
         }
 
@@ -683,7 +740,25 @@ impl ModelFit {
             usable_context,
             estimate_basis,
             measured_tps: None, // set later, like `installed`
+            // Default band around the formula estimate; annotation sites
+            // refresh it via `set_tps_range()` once a measurement is known.
+            tps_range: Some(TpsRange::empirical(estimated_tps)),
         }
+    }
+
+    /// Attach (or refresh) the throughput interval. Call after
+    /// `measured_tps` is known; derives community p10–p90 when enough runs
+    /// exist, else the documented ±25 % band around whatever value will be
+    /// displayed.
+    pub fn set_tps_range(&mut self) {
+        self.tps_range = Some(match &self.measured_tps {
+            Some(m) if m.sample_count >= 3 && m.p90 > m.p10 => TpsRange {
+                low: m.p10,
+                high: m.p90,
+                source: TpsRangeSource::CommunitySamples,
+            },
+            _ => TpsRange::empirical(self.displayed_tps()),
+        });
     }
 
     /// Context column text: `"262k→14k"` when the memory pool constrains
@@ -3105,6 +3180,71 @@ mod tests {
             (tps_moe - expected).abs() / expected < 0.05,
             "moe tps {tps_moe:.2} vs hand-computed {expected:.2}"
         );
+    }
+
+    #[test]
+    fn test_tps_range_empirical_fallback_and_format() {
+        // No measurement: documented ±25% band around the estimate.
+        let model = test_model("7B", 4.5, None);
+        let analyzed = ModelFit::analyze(&model, &test_system(16.0, false, None));
+        let range = analyzed
+            .tps_range
+            .clone()
+            .expect("range must always be set");
+        assert_eq!(range.source, TpsRangeSource::EmpiricalBand);
+        let point = analyzed.displayed_tps();
+        assert!((range.low - point * 0.75).abs() < 1e-9);
+        assert!((range.high - point * 1.25).abs() < 1e-9);
+
+        // Compact rendering "low–high" without unit.
+        let r = TpsRange {
+            low: 11.04,
+            high: 13.96,
+            source: TpsRangeSource::EmpiricalBand,
+        };
+        assert_eq!(r.compact(), "11–14");
+        assert_eq!(r.to_string(), "11.0–14.0 tok/s");
+    }
+
+    #[test]
+    fn test_tps_range_community_percentiles_when_enough_samples() {
+        use crate::benchmarks::{MeasuredSource, MeasuredTps};
+        let model = test_model("7B", 4.5, None);
+        let mut fit = ModelFit::analyze(&model, &test_system(16.0, false, None));
+        fit.measured_tps = Some(MeasuredTps {
+            tok_s: 12.5,
+            sample_count: 9,
+            hardware_label: "RTX 3090 (24 GB)".to_string(),
+            source: MeasuredSource::Community,
+            p10: 10.2,
+            p90: 15.1,
+        });
+        fit.set_tps_range();
+        let range = fit.tps_range.unwrap();
+        assert_eq!(range.source, TpsRangeSource::CommunitySamples);
+        assert_eq!(range.low, 10.2);
+        assert_eq!(range.high, 15.1);
+    }
+
+    #[test]
+    fn test_tps_range_single_local_run_gets_empirical_band() {
+        use crate::benchmarks::{MeasuredSource, MeasuredTps};
+        // A single local run is ground truth for its point but carries no
+        // spread: band stays empirical, centered on the measured value.
+        let model = test_model("7B", 4.5, None);
+        let mut fit = ModelFit::analyze(&model, &test_system(16.0, false, None));
+        fit.measured_tps = Some(MeasuredTps {
+            tok_s: 20.0,
+            sample_count: 1,
+            hardware_label: "this machine".to_string(),
+            source: MeasuredSource::LocalBench,
+            p10: 20.0,
+            p90: 20.0,
+        });
+        fit.set_tps_range();
+        let range = fit.tps_range.unwrap();
+        assert_eq!(range.source, TpsRangeSource::EmpiricalBand);
+        assert!((range.low - 15.0).abs() < 1e-9 && (range.high - 25.0).abs() < 1e-9);
     }
 
     #[test]

@@ -2940,6 +2940,7 @@ fn main() {
                     &fit.model.name,
                     &fit.best_quant,
                 );
+                fit.set_tps_range();
                 if cli.json {
                     display::display_json_fits(&specs, &[fit]);
                 } else {
@@ -3239,6 +3240,7 @@ mod tests {
             usable_context: 8192,
             estimate_basis: Default::default(),
             measured_tps: None,
+            tps_range: None,
         }
     }
 

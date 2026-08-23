@@ -1969,6 +1969,28 @@ fn draw_detail(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeColors) {
                 Style::default().fg(tc.fg),
             ),
         ]),
+        match &fit.tps_range {
+            Some(r) => Line::from(vec![
+                Span::styled("  Expected range:", Style::default().fg(tc.muted)),
+                Span::styled(
+                    format!(
+                        " {} ({})",
+                        r,
+                        match r.source {
+                            llmfit_core::fit::TpsRangeSource::CommunitySamples =>
+                                "community p10–p90",
+                            llmfit_core::fit::TpsRangeSource::EmpiricalBand =>
+                                "±25% empirical band",
+                        }
+                    ),
+                    Style::default().fg(tc.fg),
+                ),
+            ]),
+            None => Line::from(vec![Span::styled(
+                "  Expected range: n/a",
+                Style::default().fg(tc.muted),
+            )]),
+        },
     ]);
 
     // MoE Architecture section
