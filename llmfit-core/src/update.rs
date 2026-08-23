@@ -709,6 +709,10 @@ fn map_to_llm_model(hf: HfApiModel, token: Option<&str>) -> Option<LlmModel> {
         vocab_size,
         shared_expert_intermediate_size,
         architecture,
+        sliding_window: None,
+        rope_scaling_type: None,
+        rope_scaling_factor: None,
+        rope_original_context_length: None,
     })
 }
 

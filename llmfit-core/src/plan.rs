@@ -131,6 +131,12 @@ pub struct PlanEstimate {
     /// savings vs the fp16 baseline. Surfaced by phase 5.
     #[serde(default)]
     pub kv_alternatives: Vec<KvQuantAlternative>,
+    /// Ready-to-run `llama-server` command for the preferred run path, with
+    /// concrete `-ngl` / `--n-cpu-moe` numbers derived from the same memory
+    /// ledger as the estimates. `None` when the model metadata is too thin
+    /// to be honest about the split.
+    #[serde(default)]
+    pub llamacpp_command: Option<String>,
 }
 
 pub fn normalize_quant(quant: &str) -> Option<String> {
@@ -413,6 +419,54 @@ fn evaluate_current(
             if target_tps.is_none_or(|t| offload_tps >= t) {
                 candidates.push((offload_fit, PlanRunPath::CpuOffload, offload_tps));
             }
+
+            // MoE expert split: the naive comparisons above charge the WHOLE
+            // model against one resource, which mislabels every large MoE as
+            // TooTight everywhere. The realistic recipe keeps dense weights,
+            // active experts and KV in VRAM while inactive experts live in
+            // RAM — so rate that path on both halves actually used.
+            if model.is_moe {
+                let kv_gb = model.kv_cache_gb(context, kv_quant);
+                let vram_side = model.moe_active_vram_gb().unwrap_or(0.0) + kv_gb;
+                let ram_side = model.moe_offloaded_ram_gb().unwrap_or(0.0);
+                let worst_fit = {
+                    let vram_fit = fit_level_for(
+                        PlanRunPath::CpuOffload,
+                        vram_side,
+                        gpu_vram,
+                        model.recommended_ram_gb,
+                    );
+                    let ram_fit = fit_level_for(
+                        PlanRunPath::CpuOffload,
+                        ram_side,
+                        system.available_ram_gb,
+                        model.recommended_ram_gb,
+                    );
+                    let rank = |f: FitLevel| match f {
+                        FitLevel::Perfect => 4,
+                        FitLevel::Good => 3,
+                        FitLevel::Marginal => 2,
+                        FitLevel::TooTight => 1,
+                    };
+                    if rank(vram_fit) <= rank(ram_fit) {
+                        vram_fit
+                    } else {
+                        ram_fit
+                    }
+                };
+                let moe_tps = estimate_tps_with_gpu(
+                    model,
+                    quant,
+                    system.backend,
+                    PlanRunPath::CpuOffload,
+                    system.total_cpu_cores,
+                    Some(system),
+                    config,
+                );
+                if target_tps.is_none_or(|t| moe_tps >= t) {
+                    candidates.push((worst_fit, PlanRunPath::CpuOffload, moe_tps));
+                }
+            }
         }
     }
 
@@ -454,7 +508,7 @@ fn evaluate_current(
     if let Some((fit_level, path, tps)) = candidates.first() {
         PlanCurrentStatus {
             fit_level: *fit_level,
-            run_mode: path.run_mode(),
+            run_mode: speed_run_mode(*path, model),
             estimated_tps: *tps,
         }
     } else {
@@ -804,7 +858,106 @@ pub fn estimate_model_plan_with_config(
         current,
         upgrade_deltas,
         kv_alternatives,
+        llamacpp_command: None,
     })
+}
+
+/// How many of the first transformer layers should keep their MoE expert
+/// weights in system RAM — the `N` in llama.cpp's `--n-cpu-moe N`.
+///
+/// llama.cpp places expert tensors statically per layer (the experts of the
+/// *first* N layers live on the CPU), so the split is derived from a simple
+/// static ledger: VRAM minus KV cache, minus the always-resident dense path
+/// weights, minus a fixed reserve for compute buffers, must fit the expert
+/// tensors of every layer we keep on the GPU.
+///
+/// `expert_bytes_per_layer_gb` is the exact introspected size of one layer's
+/// routed-expert tensors; without it, the inactive-parameter mass (the
+/// engine's own MoE convention) spread uniformly over layers is used, which
+/// slightly over-estimates the CPU side and therefore errs on the safe side.
+pub fn recommended_n_cpu_moe(
+    model: &LlmModel,
+    vram_gb: f64,
+    kv_cache_gb: f64,
+    expert_bytes_per_layer_gb: Option<f64>,
+) -> Option<u32> {
+    if !model.is_moe {
+        return None;
+    }
+    let n_layers = model.num_hidden_layers? as f64;
+    // CUDA graphs, activation buffers and flash-attention workspace.
+    const OVERHEAD_GB: f64 = 1.5;
+
+    let per_layer_expert_gb = match expert_bytes_per_layer_gb {
+        Some(exact) => exact,
+        None => model.moe_offloaded_ram_gb()? / n_layers,
+    };
+    if per_layer_expert_gb <= 0.0 {
+        return Some(0);
+    }
+
+    let resident_dense_vram = model.moe_active_vram_gb().unwrap_or(0.0);
+    let available_for_experts =
+        (vram_gb - kv_cache_gb - resident_dense_vram - OVERHEAD_GB).max(0.0);
+    let gpu_expert_layers = (available_for_experts / per_layer_expert_gb)
+        .floor()
+        .min(n_layers);
+    let cpu_expert_layers = (n_layers - gpu_expert_layers).round() as u32;
+    Some(cpu_expert_layers.clamp(0, model.num_hidden_layers.unwrap_or(0)))
+}
+
+/// Build the ready-to-run `llama-server` command for the plan's preferred
+/// run path. `model_ref` is either `-hf owner/repo:quant` or `-m <path>`;
+/// pass an empty string to skip command generation entirely.
+///
+/// The RoPE scaling declared in the GGUF metadata (YaRN etc.) needs no extra
+/// flags: llama.cpp reads `{arch}.rope.scaling.*` keys itself at load time
+/// (verified against llama-model.cpp), so emitting them would be redundant.
+pub fn llamacpp_server_command(
+    model: &LlmModel,
+    plan: &PlanEstimate,
+    system: &SystemSpecs,
+    model_ref: &str,
+    expert_bytes_per_layer_gb: Option<f64>,
+) -> Option<String> {
+    let model_ref = model_ref.trim();
+    if model_ref.is_empty() {
+        return None;
+    }
+    let base = format!("llama-server {} -c {} -fa", model_ref, plan.context);
+
+    let mut cmd = match plan.current.run_mode {
+        RunMode::Gpu => format!("{} -ngl 99", base),
+        RunMode::CpuOnly => format!("{} -ngl 0", base),
+        // Dense partial offload: llama.cpp's own "auto" resolves the layer
+        // count from free VRAM at load time; guessing it here would need an
+        // embeddings/output head ledger we do not track honestly yet.
+        RunMode::CpuOffload if !model.is_moe => format!("{} -ngl auto", base),
+        // MoE partial offload (the engine labels it CpuOffload or
+        // MoeOffload): all blocks stay resident and the routed-expert
+        // tensors of the first N layers spill to RAM.
+        RunMode::MoeOffload | RunMode::TensorParallel | RunMode::CpuOffload => {
+            let vram = system
+                .total_gpu_vram_gb
+                .or(system.gpu_vram_gb)
+                .unwrap_or(0.0);
+            let kv = model.kv_cache_gb(plan.context, plan.kv_quant);
+            let n = recommended_n_cpu_moe(model, vram, kv, expert_bytes_per_layer_gb)
+                .filter(|&n| n > 0);
+            match n {
+                Some(n) => format!("{} -ngl 99 --n-cpu-moe {}", base, n),
+                None => format!("{} -ngl 99", base),
+            }
+        }
+    };
+
+    // KV cache quantization flags for the options llama.cpp actually accepts.
+    match plan.kv_quant {
+        KvQuant::Q8_0 => cmd.push_str(" -ctv q8_0"),
+        KvQuant::Q4_0 => cmd.push_str(" -ctv q4_0"),
+        _ => {}
+    }
+    Some(cmd)
 }
 
 /// Build the "what if" KV quant rows for the plan output. Includes every
@@ -957,6 +1110,10 @@ mod tests {
             vocab_size: None,
             shared_expert_intermediate_size: None,
             architecture: None,
+            sliding_window: None,
+            rope_scaling_type: None,
+            rope_scaling_factor: None,
+            rope_original_context_length: None,
         }
     }
 
@@ -2016,5 +2173,123 @@ mod tests {
             tq.note.as_deref().unwrap_or("").contains("vLLM"),
             "expected vLLM hint in note"
         );
+    }
+
+    fn test_moe_layers() -> LlmModel {
+        LlmModel {
+            num_hidden_layers: Some(8),
+            num_attention_heads: Some(16),
+            num_key_value_heads: Some(4),
+            head_dim: Some(128),
+            context_length: 40960,
+            ..test_moe_model()
+        }
+    }
+
+    #[test]
+    fn n_cpu_moe_is_none_for_dense_models() {
+        let mut dense = test_model();
+        dense.num_hidden_layers = Some(8);
+        assert_eq!(recommended_n_cpu_moe(&dense, 24.0, 1.0, None), None);
+    }
+
+    #[test]
+    fn n_cpu_moe_covers_all_layers_when_vram_is_zero() {
+        let model = test_moe_layers();
+        let n = recommended_n_cpu_moe(&model, 0.0, 0.0, None).unwrap();
+        assert_eq!(n, 8, "no VRAM means every layer's experts stay in RAM");
+    }
+
+    #[test]
+    fn n_cpu_moe_decreases_as_vram_grows_and_never_exceeds_layers() {
+        let model = test_moe_layers();
+        let tight = recommended_n_cpu_moe(&model, 4.0, 0.5, None).unwrap();
+        let roomy = recommended_n_cpu_moe(&model, 400.0, 0.5, None).unwrap();
+        assert!(tight > roomy, "more VRAM must offload fewer layers");
+        assert!(roomy < 8 && tight <= 8);
+    }
+
+    #[test]
+    fn n_cpu_moe_honors_exact_expert_bytes_per_layer() {
+        let model = test_moe_layers();
+        // Exact introspected size: each layer's experts weigh exactly 2 GiB,
+        // so a 10 GiB budget (after KV + dense + overhead) fits 5 layers.
+        let n = recommended_n_cpu_moe(&model, 100.0, 1.0, Some(2.0)).unwrap();
+        let dense_vram = model.moe_active_vram_gb().unwrap_or(0.0);
+        let expected = (8.0
+            - ((100.0 - 1.0 - dense_vram - 1.5).max(0.0) / 2.0)
+                .floor()
+                .min(8.0))
+        .round() as u32;
+        assert_eq!(n, expected.clamp(0, 8));
+    }
+
+    #[test]
+    fn server_command_reflects_run_mode_and_context() {
+        use crate::hardware::GpuBackend;
+
+        // Dense model that fits fully on a large GPU -> Gpu path.
+        let mut gpu_specs = test_specs();
+        gpu_specs.total_gpu_vram_gb = Some(64.0);
+        gpu_specs.gpu_vram_gb = Some(64.0);
+        gpu_specs.backend = GpuBackend::Cuda;
+        let req = PlanRequest {
+            context: 16384,
+            quant: None,
+            target_tps: None,
+            kv_quant: None,
+        };
+        let plan = estimate_model_plan(&test_model(), &req, &gpu_specs).unwrap();
+        let cmd = llamacpp_server_command(
+            &test_model(),
+            &plan,
+            &gpu_specs,
+            "-hf org/model:Q4_K_M",
+            None,
+        )
+        .unwrap();
+        assert!(
+            cmd.starts_with("llama-server -hf org/model:Q4_K_M -c 16384 -fa"),
+            "{cmd}"
+        );
+        assert!(cmd.contains("-ngl 99"), "{cmd}");
+        assert!(
+            !cmd.contains("--n-cpu-moe"),
+            "dense GPU run needs no expert split: {cmd}"
+        );
+
+        // MoE model squeezed into small VRAM -> MoeOffload with a split.
+        let moe = test_moe_layers();
+        let mut tight_specs = test_specs();
+        tight_specs.gpu_vram_gb = Some(6.0);
+        tight_specs.total_gpu_vram_gb = Some(6.0);
+        tight_specs.backend = GpuBackend::Cuda;
+        let plan = estimate_model_plan(&moe, &req, &tight_specs).unwrap();
+        if plan.current.run_mode == RunMode::MoeOffload {
+            let cmd = llamacpp_server_command(&moe, &plan, &tight_specs, "-m ./model.gguf", None)
+                .unwrap();
+            assert!(cmd.contains("-ngl 99 --n-cpu-moe "), "{cmd}");
+        }
+    }
+
+    #[test]
+    fn server_command_skipped_without_model_ref_and_flags_kv_quant() {
+        let req = PlanRequest {
+            context: 4096,
+            quant: None,
+            target_tps: None,
+            kv_quant: None,
+        };
+        let plan = estimate_model_plan(&test_model(), &req, &test_specs()).unwrap();
+        assert_eq!(
+            llamacpp_server_command(&test_model(), &plan, &test_specs(), "   ", None),
+            None
+        );
+
+        let mut q8 = plan.clone();
+        q8.kv_quant = KvQuant::Q8_0;
+        let cmd =
+            llamacpp_server_command(&test_model(), &q8, &test_specs(), "-m m.gguf", None).unwrap();
+        assert!(cmd.contains("-ctv q8_0"), "{cmd}");
     }
 }

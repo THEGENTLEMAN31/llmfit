@@ -558,6 +558,24 @@ pub struct LlmModel {
     /// "deepseek_v3"). Used to infer model generation for quality scoring.
     #[serde(default)]
     pub architecture: Option<String>,
+    /// Sliding-window attention size in tokens (Gemma 2/3, Mistral, ...).
+    /// When set and the requested context exceeds the window, the KV cache
+    /// estimate is capped at `window` tokens per layer: a sliding-window
+    /// layer never attends beyond its window regardless of context length.
+    #[serde(default)]
+    pub sliding_window: Option<u32>,
+    /// RoPE scaling scheme declared by the model metadata ("linear",
+    /// "yarn", ...). llama.cpp reads the same keys from GGUF metadata and
+    /// applies them automatically, so this is informational for the plan
+    /// output rather than an extra command-line flag.
+    #[serde(default)]
+    pub rope_scaling_type: Option<String>,
+    /// RoPE scaling factor (e.g. 4.0 for YaRN x4).
+    #[serde(default)]
+    pub rope_scaling_factor: Option<f64>,
+    /// Context length the model was trained at before RoPE scaling.
+    #[serde(default)]
+    pub rope_original_context_length: Option<u32>,
 }
 
 /// Composition of attention layers in a hybrid model.
@@ -908,9 +926,19 @@ impl LlmModel {
         // is `kv_lora_rank + rope_dim` elements — NOT the GQA layout
         // `2 * n_kv_heads * head_dim`, which overestimates these models by
         // roughly 25x.
+        // Sliding-window attention: a windowed layer never stores more than
+        // `window` tokens of KV, even when the requested context is larger.
+        // This assumes every attention layer is windowed; hybrid designs
+        // (Gemma 2/3, Llama 4, Granite) interleave full-context layers, so
+        // the real cache sits between this floor and the un-capped estimate.
+        let kv_ctx = match self.sliding_window {
+            Some(w) if w > 0 => (ctx as f64).min(w as f64),
+            _ => ctx as f64,
+        };
+
         if let (Some(n_layers), Some(lora)) = (self.num_hidden_layers, self.kv_lora_rank) {
             let elems = lora as f64 + self.qk_rope_head_dim.unwrap_or(0) as f64;
-            let total_bytes = n_layers as f64 * elems * ctx as f64 * kv.bytes_per_element();
+            let total_bytes = n_layers as f64 * elems * kv_ctx * kv.bytes_per_element();
             return total_bytes / 1_073_741_824.0;
         }
 
@@ -922,7 +950,7 @@ impl LlmModel {
                 .unwrap_or(8);
 
             let bytes_per_layer =
-                |bpe: f64| -> f64 { 2.0 * n_kv_heads as f64 * head_dim as f64 * ctx as f64 * bpe };
+                |bpe: f64| -> f64 { 2.0 * n_kv_heads as f64 * head_dim as f64 * kv_ctx * bpe };
 
             let total_bytes = match kv {
                 KvQuant::TurboQuant => {
@@ -1042,6 +1070,99 @@ impl LlmModel {
         let bpp = self.quant_bpp();
         Some((inactive * bpp) / (1024.0 * 1024.0 * 1024.0))
     }
+
+    /// Build an engine model from introspected GGUF metadata, so `plan` can
+    /// reuse the exact same KV/memory/speed machinery as catalog entries
+    /// instead of guessing from a file name. Every field stays honest: what
+    /// the header does not declare simply stays `None`.
+    pub fn from_gguf_summary(summary: &crate::gguf::GgufModelSummary, display_name: &str) -> Self {
+        let weights_gib = summary.weights_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+        let is_moe = summary.expert_count.unwrap_or(0) > 0 || summary.has_routed_experts;
+
+        LlmModel {
+            name: display_name.to_string(),
+            provider: "gguf".to_string(),
+            parameter_count: format_parameter_count(summary.total_parameters),
+            parameters_raw: Some(summary.total_parameters),
+            min_ram_gb: (weights_gib * 1.1).max(2.0),
+            recommended_ram_gb: (weights_gib * 1.5).max(4.0),
+            min_vram_gb: None,
+            // The audited dominant tensor type is the closest thing the file
+            // has to a declared quantization; fall back to Q8_0 (a safe,
+            // widely-supported default) when no tensor was recognized.
+            quantization: summary
+                .dominant_quant_label
+                .clone()
+                .unwrap_or_else(|| "Q8_0".to_string()),
+            context_length: summary.context_length.unwrap_or(4096).min(u32::MAX as u64) as u32,
+            use_case: "general".to_string(),
+            is_moe,
+            num_experts: summary.expert_count.map(|v| v.min(u32::MAX as u64) as u32),
+            active_experts: summary
+                .expert_used_count
+                .map(|v| v.min(u32::MAX as u64) as u32),
+            active_parameters: summary.active_parameters,
+            release_date: None,
+            gguf_sources: Vec::new(),
+            capabilities: Vec::new(),
+            languages: Vec::new(),
+            format: ModelFormat::Gguf,
+            num_attention_heads: summary
+                .attention_heads
+                .map(|v| v.min(u32::MAX as u64) as u32),
+            num_key_value_heads: summary
+                .key_value_heads
+                .map(|v| v.min(u32::MAX as u64) as u32),
+            num_hidden_layers: summary.block_count.map(|v| v.min(u32::MAX as u64) as u32),
+            head_dim: summary.key_length.map(|v| v.min(u32::MAX as u64) as u32),
+            kv_lora_rank: summary.kv_lora_rank.map(|v| v.min(u32::MAX as u64) as u32),
+            // The decoupled RoPE dimension only exists on MLA architectures;
+            // elsewhere rope.dimension_count is the full head RoPE dim and
+            // must not be mistaken for the decoupled part.
+            qk_rope_head_dim: if summary.kv_lora_rank.is_some() {
+                summary
+                    .rope_dimension_count
+                    .map(|v| v.min(u32::MAX as u64) as u32)
+            } else {
+                None
+            },
+            attention_layout: None,
+            license: None,
+            hidden_size: summary
+                .embedding_length
+                .map(|v| v.min(u32::MAX as u64) as u32),
+            moe_intermediate_size: summary
+                .expert_feed_forward_length
+                .map(|v| v.min(u32::MAX as u64) as u32),
+            vocab_size: summary.vocab_size.map(|v| v.min(u32::MAX as u64) as u32),
+            shared_expert_intermediate_size: None,
+            architecture: summary.architecture.clone(),
+            sliding_window: summary
+                .sliding_window
+                .map(|v| v.min(u32::MAX as u64) as u32),
+            rope_scaling_type: summary.rope_scaling_type.clone(),
+            rope_scaling_factor: summary.rope_scaling_factor,
+            rope_original_context_length: summary
+                .rope_original_context_length
+                .map(|v| v.min(u32::MAX as u64) as u32),
+        }
+    }
+}
+
+/// Human-readable parameter count ("235B", "7.6B", "260M") matching the
+/// compact style used across the catalog.
+fn format_parameter_count(total: u64) -> String {
+    let t = total as f64;
+    let (value, unit) = if t >= 1_000_000_000_000.0 {
+        (t / 1_000_000_000_000.0, "T")
+    } else if t >= 1_000_000_000.0 {
+        (t / 1_000_000_000.0, "B")
+    } else {
+        (t / 1_000_000.0, "M")
+    };
+    let formatted = format!("{value:.1}");
+    let trimmed = formatted.strip_suffix(".0").unwrap_or(formatted.as_str());
+    format!("{trimmed}{unit}")
 }
 
 /// Intermediate struct matching the JSON schema from the scraper.
@@ -1298,6 +1419,10 @@ fn entry_to_model(e: HfModelEntry) -> LlmModel {
         shared_expert_intermediate_size: e.shared_expert_intermediate_size,
         license: e.license,
         architecture: e.architecture,
+        sliding_window: None,
+        rope_scaling_type: None,
+        rope_scaling_factor: None,
+        rope_original_context_length: None,
     };
     model.capabilities = Capability::infer(&model);
     // Auto-populate attention_layout from name heuristic for known
@@ -1447,6 +1572,10 @@ impl OnnxModelEntry {
             shared_expert_intermediate_size: None,
             license: self.license,
             architecture: None,
+            sliding_window: None,
+            rope_scaling_type: None,
+            rope_scaling_factor: None,
+            rope_original_context_length: None,
         };
         model.capabilities = Capability::infer(&model);
         model
@@ -1996,6 +2125,10 @@ mod tests {
             shared_expert_intermediate_size: None,
             architecture: None,
             license: None,
+            sliding_window: None,
+            rope_scaling_type: None,
+            rope_scaling_factor: None,
+            rope_original_context_length: None,
         };
 
         // Large budget should return mlx-8bit (best in MLX hierarchy)
@@ -2081,6 +2214,10 @@ mod tests {
             shared_expert_intermediate_size: None,
             architecture: None,
             license: None,
+            sliding_window: None,
+            rope_scaling_type: None,
+            rope_scaling_factor: None,
+            rope_original_context_length: None,
         };
         assert_eq!(model.params_b(), 7.0);
     }
@@ -2120,6 +2257,10 @@ mod tests {
             shared_expert_intermediate_size: None,
             architecture: None,
             license: None,
+            sliding_window: None,
+            rope_scaling_type: None,
+            rope_scaling_factor: None,
+            rope_original_context_length: None,
         };
         assert_eq!(model.params_b(), 13.0);
     }
@@ -2159,6 +2300,10 @@ mod tests {
             shared_expert_intermediate_size: None,
             architecture: None,
             license: None,
+            sliding_window: None,
+            rope_scaling_type: None,
+            rope_scaling_factor: None,
+            rope_original_context_length: None,
         };
         assert_eq!(model.params_b(), 0.5);
     }
@@ -2198,6 +2343,10 @@ mod tests {
             shared_expert_intermediate_size: None,
             architecture: None,
             license: None,
+            sliding_window: None,
+            rope_scaling_type: None,
+            rope_scaling_factor: None,
+            rope_original_context_length: None,
         };
 
         let mem = model.estimate_memory_gb("Q4_K_M", 4096);
@@ -2245,6 +2394,10 @@ mod tests {
             shared_expert_intermediate_size: None,
             architecture: None,
             license: None,
+            sliding_window: None,
+            rope_scaling_type: None,
+            rope_scaling_factor: None,
+            rope_original_context_length: None,
         };
 
         // Large budget should return best quant
@@ -2298,6 +2451,10 @@ mod tests {
             shared_expert_intermediate_size: None,
             architecture: None,
             license: None,
+            sliding_window: None,
+            rope_scaling_type: None,
+            rope_scaling_factor: None,
+            rope_original_context_length: None,
         };
         assert!(dense_model.moe_active_vram_gb().is_none());
 
@@ -2335,6 +2492,10 @@ mod tests {
             shared_expert_intermediate_size: None,
             architecture: None,
             license: None,
+            sliding_window: None,
+            rope_scaling_type: None,
+            rope_scaling_factor: None,
+            rope_original_context_length: None,
         };
         let vram = moe_model.moe_active_vram_gb();
         assert!(vram.is_some());
@@ -2380,6 +2541,10 @@ mod tests {
             shared_expert_intermediate_size: None,
             architecture: None,
             license: None,
+            sliding_window: None,
+            rope_scaling_type: None,
+            rope_scaling_factor: None,
+            rope_original_context_length: None,
         };
         assert!(dense_model.moe_offloaded_ram_gb().is_none());
 
@@ -2417,6 +2582,10 @@ mod tests {
             shared_expert_intermediate_size: None,
             architecture: None,
             license: None,
+            sliding_window: None,
+            rope_scaling_type: None,
+            rope_scaling_factor: None,
+            rope_original_context_length: None,
         };
         let offloaded = moe_model.moe_offloaded_ram_gb();
         assert!(offloaded.is_some());
@@ -2464,6 +2633,10 @@ mod tests {
             shared_expert_intermediate_size: None,
             architecture: None,
             license: None,
+            sliding_window: None,
+            rope_scaling_type: None,
+            rope_scaling_factor: None,
+            rope_original_context_length: None,
         };
         assert_eq!(UseCase::from_model(&model), UseCase::Coding);
     }
@@ -2503,6 +2676,10 @@ mod tests {
             shared_expert_intermediate_size: None,
             architecture: None,
             license: None,
+            sliding_window: None,
+            rope_scaling_type: None,
+            rope_scaling_factor: None,
+            rope_original_context_length: None,
         };
         assert_eq!(UseCase::from_model(&model), UseCase::Embedding);
     }
@@ -2542,6 +2719,10 @@ mod tests {
             shared_expert_intermediate_size: None,
             architecture: None,
             license: None,
+            sliding_window: None,
+            rope_scaling_type: None,
+            rope_scaling_factor: None,
+            rope_original_context_length: None,
         };
         assert_eq!(UseCase::from_model(&model), UseCase::Reasoning);
     }
@@ -2782,6 +2963,10 @@ mod tests {
             shared_expert_intermediate_size: None,
             architecture: None,
             license: None,
+            sliding_window: None,
+            rope_scaling_type: None,
+            rope_scaling_factor: None,
+            rope_original_context_length: None,
         };
         let caps = Capability::infer(&model);
         assert!(caps.contains(&Capability::Vision));
@@ -2824,6 +3009,10 @@ mod tests {
             shared_expert_intermediate_size: None,
             architecture: None,
             license: None,
+            sliding_window: None,
+            rope_scaling_type: None,
+            rope_scaling_factor: None,
+            rope_original_context_length: None,
         };
         let caps = Capability::infer(&model);
         assert!(caps.contains(&Capability::ToolUse));
@@ -2865,6 +3054,10 @@ mod tests {
             shared_expert_intermediate_size: None,
             architecture: None,
             license: None,
+            sliding_window: None,
+            rope_scaling_type: None,
+            rope_scaling_factor: None,
+            rope_original_context_length: None,
         };
         let caps = Capability::infer(&model);
         assert!(caps.is_empty());
@@ -2905,6 +3098,10 @@ mod tests {
             shared_expert_intermediate_size: None,
             architecture: None,
             license: None,
+            sliding_window: None,
+            rope_scaling_type: None,
+            rope_scaling_factor: None,
+            rope_original_context_length: None,
         };
         let caps = Capability::infer(&model);
         // Should keep the explicit Vision and not duplicate it
@@ -3005,6 +3202,10 @@ mod tests {
             shared_expert_intermediate_size: None,
             architecture: None,
             license: None,
+            sliding_window: None,
+            rope_scaling_type: None,
+            rope_scaling_factor: None,
+            rope_original_context_length: None,
         };
 
         let caps = Capability::infer(&model);
@@ -3125,6 +3326,10 @@ mod tests {
             shared_expert_intermediate_size: None,
             architecture: None,
             license: None,
+            sliding_window: None,
+            rope_scaling_type: None,
+            rope_scaling_factor: None,
+            rope_original_context_length: None,
         }
     }
 
@@ -3250,6 +3455,10 @@ mod tests {
             shared_expert_intermediate_size: None,
             architecture: None,
             license: None,
+            sliding_window: None,
+            rope_scaling_type: None,
+            rope_scaling_factor: None,
+            rope_original_context_length: None,
         }
     }
 
@@ -3665,5 +3874,152 @@ mod tests {
                 m.name
             );
         }
+    }
+
+    fn swa_model(window: Option<u32>) -> LlmModel {
+        LlmModel {
+            num_hidden_layers: Some(2),
+            num_key_value_heads: Some(1),
+            head_dim: Some(64),
+            sliding_window: window,
+            ..base_test_model()
+        }
+    }
+
+    fn base_test_model() -> LlmModel {
+        LlmModel {
+            name: "Test-7B".to_string(),
+            provider: "Test".to_string(),
+            parameter_count: "7B".to_string(),
+            parameters_raw: Some(7_000_000_000),
+            min_ram_gb: 6.0,
+            recommended_ram_gb: 12.0,
+            min_vram_gb: Some(6.0),
+            quantization: "Q4_K_M".to_string(),
+            context_length: 32768,
+            use_case: "general".to_string(),
+            is_moe: false,
+            num_experts: None,
+            active_experts: None,
+            active_parameters: None,
+            release_date: None,
+            gguf_sources: vec![],
+            capabilities: vec![],
+            languages: vec![],
+            format: ModelFormat::Gguf,
+            num_attention_heads: None,
+            num_key_value_heads: None,
+            num_hidden_layers: None,
+            head_dim: None,
+            kv_lora_rank: None,
+            qk_rope_head_dim: None,
+            attention_layout: None,
+            license: None,
+            hidden_size: None,
+            moe_intermediate_size: None,
+            vocab_size: None,
+            shared_expert_intermediate_size: None,
+            architecture: None,
+            sliding_window: None,
+            rope_scaling_type: None,
+            rope_scaling_factor: None,
+            rope_original_context_length: None,
+        }
+    }
+
+    #[test]
+    fn sliding_window_caps_kv_cache_beyond_the_window() {
+        let capped = swa_model(Some(1024));
+        let uncapped = swa_model(None);
+        // Beyond the window, KV per layer stops growing: 16k context costs
+        // the same as a 1k context.
+        assert_eq!(
+            capped.kv_cache_gb(16384, KvQuant::Fp16),
+            capped.kv_cache_gb(1024, KvQuant::Fp16)
+        );
+        // Below the window nothing changes.
+        assert_eq!(
+            capped.kv_cache_gb(512, KvQuant::Fp16),
+            uncapped.kv_cache_gb(512, KvQuant::Fp16)
+        );
+    }
+
+    #[test]
+    fn gguf_summary_bridge_maps_header_fields() {
+        use crate::gguf::{ComponentBytes, GgufModelSummary};
+
+        let mut summary = GgufModelSummary {
+            model_name: None,
+            architecture: Some("qwen3moe".to_string()),
+            gguf_version: 3,
+            block_count: Some(94),
+            attention_heads: Some(64),
+            key_value_heads: Some(4),
+            key_length: Some(128),
+            value_length: None,
+            context_length: Some(40960),
+            embedding_length: Some(4096),
+            feed_forward_length: None,
+            expert_count: Some(128),
+            expert_used_count: Some(8),
+            expert_feed_forward_length: Some(1536),
+            kv_lora_rank: None,
+            rope_dimension_count: Some(128),
+            rope_freq_base: None,
+            rope_scaling_type: Some("yarn".to_string()),
+            rope_scaling_factor: Some(4.0),
+            rope_original_context_length: Some(32768),
+            sliding_window: None,
+            vocab_size: Some(151936),
+            tensor_count: 0,
+            total_parameters: 235_000_000_000,
+            active_parameters: Some(22_000_000_000),
+            weights_bytes: 133_000_000_000,
+            unknown_type_tensors: vec![],
+            quant_mix: vec![],
+            dominant_quant_label: Some("Q4_K_M".to_string()),
+            layer_quants: vec![],
+            components: ComponentBytes {
+                embeddings: 0,
+                output_head: 0,
+                attention: 0,
+                dense_ffn: 0,
+                routed_experts: 100_000_000_000,
+                other: 0,
+            },
+            has_routed_experts: true,
+        };
+
+        let model = LlmModel::from_gguf_summary(&summary, "Qwen3-235B-A22B-Q4_K_M");
+        assert_eq!(model.name, "Qwen3-235B-A22B-Q4_K_M");
+        assert_eq!(model.provider, "gguf");
+        assert_eq!(model.architecture.as_deref(), Some("qwen3moe"));
+        assert_eq!(model.parameter_count, "235B");
+        assert_eq!(model.num_hidden_layers, Some(94));
+        assert_eq!(model.num_attention_heads, Some(64));
+        assert_eq!(model.num_key_value_heads, Some(4));
+        assert_eq!(model.head_dim, Some(128));
+        assert!(model.is_moe);
+        assert_eq!(model.num_experts, Some(128));
+        assert_eq!(model.active_experts, Some(8));
+        assert_eq!(model.quantization, "Q4_K_M");
+        assert_eq!(model.context_length, 40960);
+        assert_eq!(model.rope_scaling_type.as_deref(), Some("yarn"));
+        assert_eq!(model.rope_scaling_factor, Some(4.0));
+        assert_eq!(model.rope_original_context_length, Some(32768));
+
+        // MLA mapping: the decoupled RoPE dim only appears when the latent
+        // rank exists; otherwise rope.dimension_count must NOT leak into it.
+        summary.kv_lora_rank = Some(512);
+        summary.rope_dimension_count = Some(64);
+        let mla = LlmModel::from_gguf_summary(&summary, "mla");
+        assert_eq!(mla.kv_lora_rank, Some(512));
+        assert_eq!(mla.qk_rope_head_dim, Some(64));
+        summary.kv_lora_rank = None;
+        let non_mla = LlmModel::from_gguf_summary(&summary, "plain");
+        assert_eq!(non_mla.qk_rope_head_dim, None);
+
+        // RAM floors derive from real weight bytes, not catalog guesses.
+        assert!(model.min_ram_gb >= 133.0 / 1024.0 * 1.1 - 0.01);
     }
 }

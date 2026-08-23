@@ -2055,6 +2055,218 @@ fn run_model(model: &str, server: bool, port: u16, ngl: i32, ctx_size: u32) {
     }
 }
 
+/// A plan target resolved either from the embedded catalog or from real
+/// introspected GGUF metadata (local file, HF repo id, or https URL).
+struct PlanModel {
+    model: llmfit_core::models::LlmModel,
+    /// `-hf owner/repo:quant` or `-m <path>` fragment for the generated
+    /// command; empty when no concrete artifact is known.
+    model_ref: String,
+    /// Exact routed-expert tensor bytes per layer (GiB) when introspected
+    /// from a GGUF header; None for catalog models.
+    expert_bytes_per_layer_gb: Option<f64>,
+}
+
+/// Extract the quantization variant from a GGUF filename
+/// ("<Model>-<QUANT>[-NNNNN-of-MMMMM].gguf"), validated against the known
+/// quant names so arbitrary model suffixes are never mistaken for one.
+fn gguf_variant_from_filename(filename: &str) -> Option<String> {
+    let stem = filename.strip_suffix(".gguf")?;
+    let without_shard = match stem.rfind("-of-") {
+        Some(pos) => {
+            let before = &stem[..pos];
+            let dash = before.rfind('-')?;
+            &before[..dash]
+        }
+        None => stem,
+    };
+    let variant = without_shard.rsplit('-').next()?;
+    llmfit_core::plan::normalize_quant(variant)
+}
+
+/// Resolve a plan target. Catalog entries win when the selector matches one;
+/// otherwise the same three forms as `audit` (local .gguf path, HF repo id,
+/// https URL) are introspected so planning runs on real header data instead
+/// of catalog heuristics.
+/// Resolve a plan target. Precedence: existing file > https URL > exact
+/// catalog name > HF repo id (owner/repo) > fuzzy catalog match. Explicit
+/// artifact forms win over fuzzy catalog hits so planning runs on real
+/// header data whenever the user points at something concrete; plain names
+/// keep the fast offline catalog path.
+fn resolve_plan_model(selector: &str, quant: Option<&str>) -> Result<PlanModel, String> {
+    let is_url = selector.starts_with("http://") || selector.starts_with("https://");
+    let looks_like_repo = !is_url
+        && !selector.starts_with('.')
+        && !selector.starts_with('/')
+        && !selector.contains('\\')
+        && selector.contains('/');
+    let is_file = std::path::Path::new(selector).exists();
+
+    // 1-2. Concrete artifacts always introspect.
+    if is_file || is_url {
+        return introspect_plan_model(selector, quant, is_url);
+    }
+
+    let db = ModelDatabase::new();
+    let catalog = db.get_all_models();
+
+    // 3. Exact catalog name ("Owner/Model-8B" as listed by `list`).
+    if let Some(model) = catalog_exact_match(catalog, selector) {
+        return catalog_plan_model(model, quant);
+    }
+
+    // 4. Repo id: prefer real header data over fuzzy catalog guesses.
+    if looks_like_repo {
+        return introspect_plan_model(selector, quant, false);
+    }
+
+    // 5. Fuzzy catalog match ("llama-3.1-8b").
+    resolve_model_selector(catalog, selector).and_then(|m| catalog_plan_model(m.clone(), quant))
+}
+
+fn catalog_exact_match(
+    models: &[llmfit_core::models::LlmModel],
+    selector: &str,
+) -> Option<llmfit_core::models::LlmModel> {
+    let needle = selector.trim().to_lowercase();
+    if needle.is_empty() {
+        return None;
+    }
+    models
+        .iter()
+        .find(|m| m.name.to_lowercase() == needle)
+        .cloned()
+}
+
+/// Wrap a catalog model into a PlanModel, deriving `-hf repo:quant` from its
+/// known GGUF sources when available.
+fn catalog_plan_model(
+    model: llmfit_core::models::LlmModel,
+    quant: Option<&str>,
+) -> Result<PlanModel, String> {
+    let requested = quant
+        .map(str::to_string)
+        .unwrap_or_else(|| model.quantization.clone());
+    let normalized = llmfit_core::plan::normalize_quant(&requested).unwrap_or(requested);
+    let model_ref = model
+        .gguf_sources
+        .first()
+        .map(|s| format!("-hf {}:{}", s.repo, normalized))
+        .unwrap_or_default();
+    Ok(PlanModel {
+        model,
+        model_ref,
+        expert_bytes_per_layer_gb: None,
+    })
+}
+
+/// Introspect a concrete artifact: local .gguf file, HF repo id or https URL.
+fn introspect_plan_model(
+    selector: &str,
+    quant: Option<&str>,
+    is_url: bool,
+) -> Result<PlanModel, String> {
+    const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+    let looks_like_repo = !is_url;
+
+    if is_url {
+        eprintln!(
+            "note: download the GGUF first; the generated command assumes it in the current directory"
+        );
+    }
+
+    let (display_name, summary, source_filename) = if std::path::Path::new(selector).exists() {
+        let file = llmfit_core::gguf::GgufFile::open(std::path::Path::new(selector))?;
+        let summary = llmfit_core::gguf::GgufModelSummary::from_header(&file.header);
+        let stem = file
+            .path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("model")
+            .to_string();
+        (stem, summary, selector.to_string())
+    } else if is_url || looks_like_repo {
+        let url = if is_url {
+            selector.to_string()
+        } else {
+            let (_filename, url, _size) =
+                llmfit_core::remote::resolve_repo_gguf_url(selector, quant)?;
+            url
+        };
+        let remote_gguf = llmfit_core::remote::open_remote_gguf(&url)?;
+        let summary = remote_gguf.summarize();
+        let filename = url
+            .rsplit('/')
+            .next()
+            .unwrap_or("remote-model.gguf")
+            .to_string();
+        let name = filename
+            .strip_suffix(".gguf")
+            .unwrap_or(&filename)
+            .to_string();
+        (name, summary, filename)
+    } else {
+        return Err(format!(
+            "cannot open '{selector}': no such file. For remote planning pass an HF repo id (owner/repo) or an https:// URL."
+        ));
+    };
+
+    // A shard carries whole-model metadata but only its share of the tensor
+    // data; rescale byte/parameter counts before bridging into the engine.
+    let summary = match display::shard_info(&source_filename) {
+        Some((_index, count)) if count > 1 => {
+            eprintln!("note: sharded model ({count} parts); estimates scaled to the full set");
+            summary.scaled_to_full_model(count)
+        }
+        _ => summary,
+    };
+
+    let model = llmfit_core::models::LlmModel::from_gguf_summary(&summary, &display_name);
+    let expert_bytes_per_layer_gb = match summary.block_count {
+        Some(layers) if layers > 0 && summary.components.routed_experts > 0 => {
+            Some(summary.components.routed_experts as f64 / layers as f64 / GIB)
+        }
+        _ => None,
+    };
+    let model_ref = build_plan_model_ref(
+        selector,
+        std::path::Path::new(selector).exists(),
+        is_url,
+        quant,
+    );
+    Ok(PlanModel {
+        model,
+        model_ref,
+        expert_bytes_per_layer_gb,
+    })
+}
+
+/// Command fragment pointing llama-server at the artifact: `-m <file>` for
+/// local files and URLs (which must be downloaded first), `-hf repo:variant`
+/// for repo ids.
+fn build_plan_model_ref(
+    selector: &str,
+    is_file: bool,
+    is_url: bool,
+    quant: Option<&str>,
+) -> String {
+    if is_file {
+        format!("-m {selector}")
+    } else if is_url {
+        let filename = selector.rsplit('/').next().unwrap_or("model.gguf");
+        format!("-m ./{filename}")
+    } else {
+        // Repo id; pick the variant from --quant or the resolved filename.
+        let variant = quant
+            .map(|q| llmfit_core::plan::normalize_quant(q))
+            .unwrap_or_else(|| gguf_variant_from_filename(selector));
+        match variant {
+            Some(v) => format!("-hf {selector}:{v}"),
+            None => format!("-hf {selector}"),
+        }
+    }
+}
+
 fn run_audit(path: &str, quant: Option<&str>, json: bool) -> Result<(), String> {
     use display::{FileSection, GgufAuditView};
     use llmfit_core::remote;
@@ -2117,9 +2329,9 @@ fn run_plan(
     json: bool,
     overrides: &HardwareOverrides,
 ) -> Result<(), String> {
-    let db = ModelDatabase::new();
     let specs = detect_specs(overrides);
-    let model = resolve_model_selector(db.get_all_models(), model_selector)?;
+    let pm = resolve_plan_model(model_selector, quant.as_deref())?;
+    let model = &pm.model;
 
     let kv_quant = match kv_quant {
         Some(s) => Some(llmfit_core::models::KvQuant::parse(&s).ok_or_else(|| {
@@ -2146,7 +2358,20 @@ fn run_plan(
         target_tps,
         kv_quant,
     };
-    let plan = estimate_model_plan(model, &request, &specs)?;
+    let mut plan = estimate_model_plan(model, &request, &specs)?;
+    // No honest command exists when nothing fits: emitting `-ngl` numbers
+    // for a machine that cannot hold the model would just produce an OOM.
+    plan.llamacpp_command = if plan.current.fit_level == llmfit_core::fit::FitLevel::TooTight {
+        None
+    } else {
+        llmfit_core::plan::llamacpp_server_command(
+            model,
+            &plan,
+            &specs,
+            &pm.model_ref,
+            pm.expert_bytes_per_layer_gb,
+        )
+    };
 
     if json {
         display::display_json_plan(&plan);
@@ -3327,6 +3552,10 @@ mod tests {
                 vocab_size: None,
                 shared_expert_intermediate_size: None,
                 architecture: None,
+                sliding_window: None,
+                rope_scaling_type: None,
+                rope_scaling_factor: None,
+                rope_original_context_length: None,
             },
             fit_level,
             run_mode: RunMode::Gpu,
@@ -3420,6 +3649,10 @@ mod tests {
                 vocab_size: None,
                 shared_expert_intermediate_size: None,
                 architecture: None,
+                sliding_window: None,
+                rope_scaling_type: None,
+                rope_scaling_factor: None,
+                rope_original_context_length: None,
             },
             LlmModel {
                 name: "Qwen/Qwen3-Coder-Next".to_string(),
@@ -3454,6 +3687,10 @@ mod tests {
                 vocab_size: None,
                 shared_expert_intermediate_size: None,
                 architecture: None,
+                sliding_window: None,
+                rope_scaling_type: None,
+                rope_scaling_factor: None,
+                rope_original_context_length: None,
             },
         ];
 

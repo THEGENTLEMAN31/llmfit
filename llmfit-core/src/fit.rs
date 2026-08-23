@@ -1970,6 +1970,10 @@ mod tests {
             vocab_size: None,
             shared_expert_intermediate_size: None,
             architecture: None,
+            sliding_window: None,
+            rope_scaling_type: None,
+            rope_scaling_factor: None,
+            rope_original_context_length: None,
         }
     }
 
@@ -2263,6 +2267,10 @@ mod tests {
             vocab_size: None,
             shared_expert_intermediate_size: None,
             architecture: None,
+            sliding_window: None,
+            rope_scaling_type: None,
+            rope_scaling_factor: None,
+            rope_original_context_length: None,
         };
         let mut system = test_system(64.0, true, Some(8.0));
         system.backend = GpuBackend::Cuda;
@@ -2310,6 +2318,10 @@ mod tests {
             vocab_size: None,
             shared_expert_intermediate_size: None,
             architecture: None,
+            sliding_window: None,
+            rope_scaling_type: None,
+            rope_scaling_factor: None,
+            rope_original_context_length: None,
         };
         let system = test_system(12.0, true, Some(8.0));
 
@@ -3750,6 +3762,10 @@ mod tests {
             vocab_size: None,
             shared_expert_intermediate_size: None,
             architecture: None,
+            sliding_window: None,
+            rope_scaling_type: None,
+            rope_scaling_factor: None,
+            rope_original_context_length: None,
         }
     }
 
@@ -4040,6 +4056,10 @@ mod tests {
             vocab_size: None,
             shared_expert_intermediate_size: None,
             architecture: None,
+            sliding_window: None,
+            rope_scaling_type: None,
+            rope_scaling_factor: None,
+            rope_original_context_length: None,
         }
     }
 
@@ -4331,6 +4351,10 @@ mod tests {
                 None
             },
             architecture: None,
+            sliding_window: None,
+            rope_scaling_type: None,
+            rope_scaling_factor: None,
+            rope_original_context_length: None,
         }
     }
 

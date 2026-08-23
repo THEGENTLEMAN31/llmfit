@@ -938,6 +938,16 @@ pub fn display_model_plan(plan: &PlanEstimate) {
         }
         println!();
     }
+
+    if let Some(cmd) = &plan.llamacpp_command {
+        println!("{}", "Suggested llama.cpp command:".bold().underline());
+        println!("  {}", cmd.green());
+        println!(
+            "  {}",
+            "(derived from the same memory ledger as the estimates; verify with a short smoke run)"
+                .dimmed()
+        );
+    }
 }
 
 pub fn display_json_plan(plan: &PlanEstimate) {
@@ -978,7 +988,7 @@ pub struct GgufAuditView {
 }
 
 /// Detect `-00001-of-00009` style shard suffixes; returns (index, count).
-fn shard_info(filename: &str) -> Option<(u32, u32)> {
+pub(crate) fn shard_info(filename: &str) -> Option<(u32, u32)> {
     let lower = filename.to_ascii_lowercase();
     let pos = lower.rfind("-of-")?;
     // Walk backwards over the digit run, then restore reading order.
@@ -1388,6 +1398,10 @@ mod tests {
                 vocab_size: None,
                 shared_expert_intermediate_size: None,
                 architecture: None,
+                sliding_window: None,
+                rope_scaling_type: None,
+                rope_scaling_factor: None,
+                rope_original_context_length: None,
             },
             fit_level: FitLevel::Good,
             run_mode,

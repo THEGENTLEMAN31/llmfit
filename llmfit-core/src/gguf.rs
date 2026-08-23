@@ -749,6 +749,37 @@ fn component_of(name: &str) -> &'static str {
 }
 
 impl GgufModelSummary {
+    /// Per-shard byte/parameter counts rescaled to the FULL sharded model.
+    ///
+    /// Sharded GGUFs split tensor data evenly across files, yet every shard
+    /// repeats the whole-model metadata (`block_count` = total layers).
+    /// Mixing one shard's tensor bytes with whole-model layer counts
+    /// underestimates memory by the shard factor — planners must scale
+    /// before bridging this summary into the engine. Display-only fields
+    /// (per-block quant runs) keep their per-shard view.
+    pub fn scaled_to_full_model(&self, shard_count: u32) -> Self {
+        let mut scaled = self.clone();
+        if shard_count <= 1 {
+            return scaled;
+        }
+        let m = u64::from(shard_count);
+        scaled.tensor_count = scaled.tensor_count.saturating_mul(m as usize);
+        scaled.total_parameters = scaled.total_parameters.saturating_mul(m);
+        scaled.active_parameters = scaled.active_parameters.map(|v| v.saturating_mul(m));
+        scaled.weights_bytes = scaled.weights_bytes.saturating_mul(m);
+        for share in &mut scaled.quant_mix {
+            share.bytes = share.bytes.saturating_mul(m);
+        }
+        let c = &mut scaled.components;
+        c.embeddings = c.embeddings.saturating_mul(m);
+        c.output_head = c.output_head.saturating_mul(m);
+        c.attention = c.attention.saturating_mul(m);
+        c.dense_ffn = c.dense_ffn.saturating_mul(m);
+        c.routed_experts = c.routed_experts.saturating_mul(m);
+        c.other = c.other.saturating_mul(m);
+        scaled
+    }
+
     pub fn from_header(header: &GgufHeader) -> Self {
         let arch = header
             .get_str("general.architecture")
@@ -1480,5 +1511,52 @@ mod tests {
             .parse_ok();
         assert_eq!(header.get_u64("x.attention.head_count"), Some(32));
         assert_eq!(header.get_i64("x.attention.head_count"), Some(32));
+    }
+
+    #[test]
+    fn scaled_to_full_model_multiplies_per_shard_counts() {
+        let summary = GgufModelSummary {
+            gguf_version: 3,
+            tensor_count: 10,
+            total_parameters: 1_000,
+            active_parameters: Some(400),
+            weights_bytes: 5_000,
+            quant_mix: vec![QuantShare {
+                label: "Q4_K".to_string(),
+                bytes: 4_000,
+                share: 0.8,
+            }],
+            components: ComponentBytes {
+                embeddings: 100,
+                output_head: 0,
+                attention: 900,
+                dense_ffn: 0,
+                routed_experts: 4_000,
+                other: 0,
+            },
+            block_count: Some(94),
+            has_routed_experts: true,
+            ..GgufModelSummary::from_header(&GgufHeader {
+                version: 3,
+                kv_count: 0,
+                metadata: BTreeMap::new(),
+                tensors: Vec::new(),
+            })
+        };
+
+        // Single file: no-op.
+        let same = summary.scaled_to_full_model(1);
+        assert_eq!(same.weights_bytes, 5_000);
+
+        let full = summary.scaled_to_full_model(5);
+        assert_eq!(full.tensor_count, 50);
+        assert_eq!(full.total_parameters, 5_000);
+        assert_eq!(full.active_parameters, Some(2_000));
+        assert_eq!(full.weights_bytes, 25_000);
+        assert_eq!(full.components.routed_experts, 20_000);
+        assert_eq!(full.quant_mix[0].bytes, 20_000);
+        assert!((full.quant_mix[0].share - 0.8).abs() < f32::EPSILON as f64);
+        // Whole-model metadata is untouched.
+        assert_eq!(full.block_count, Some(94));
     }
 }

@@ -338,3 +338,137 @@ fn audit_rejects_non_gguf_file_with_error() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// Minimal MoE-shaped GGUF: 4 blocks, each with routed-expert tensors, so
+/// `plan` has real expert mass to derive a --n-cpu-moe split from.
+fn write_moe_gguf_fixture(path: &std::path::Path) {
+    use std::io::Write;
+
+    let mut out = Vec::new();
+    out.extend_from_slice(b"GGUF");
+    out.extend_from_slice(&3u32.to_le_bytes());
+
+    let str_val = |s: &str| -> Vec<u8> {
+        let mut b = (s.len() as u64).to_le_bytes().to_vec();
+        b.extend_from_slice(s.as_bytes());
+        b
+    };
+    let u32_val = |v: u32| -> Vec<u8> { v.to_le_bytes().to_vec() };
+
+    let kvs: Vec<(String, u32, Vec<u8>)> = vec![
+        ("general.architecture".into(), 8, str_val("llama")),
+        ("llama.block_count".into(), 4, u32_val(4)),
+        ("llama.attention.head_count".into(), 4, u32_val(16)),
+        ("llama.attention.head_count_kv".into(), 4, u32_val(4)),
+        ("llama.attention.key_length".into(), 4, u32_val(128)),
+        ("llama.context_length".into(), 4, u32_val(40960)),
+        ("llama.expert_count".into(), 4, u32_val(8)),
+        ("llama.expert_used_count".into(), 4, u32_val(2)),
+    ];
+
+    let tensor = |name: &str, dims: &[u64], ty: u32| -> Vec<u8> {
+        let mut b = (name.len() as u64).to_le_bytes().to_vec();
+        b.extend_from_slice(name.as_bytes());
+        b.extend_from_slice(&(dims.len() as u32).to_le_bytes());
+        for d in dims {
+            b.extend_from_slice(&d.to_le_bytes());
+        }
+        b.extend_from_slice(&ty.to_le_bytes());
+        b.extend_from_slice(&0u64.to_le_bytes());
+        b
+    };
+
+    let mut tensors = vec![tensor("token_embd.weight", &[256, 128], 1)];
+    for blk in 0..4u64 {
+        tensors.push(tensor(&format!("blk.{blk}.attn_q.weight"), &[128, 128], 12));
+        // Routed experts: [ffn_dim, hidden, n_expert] — the mass llama.cpp
+        // moves with --n-cpu-moe. Sized (~30 GB at Q4_K) so it cannot fit
+        // whole into the fixture machine's 24 GB of VRAM.
+        tensors.push(tensor(
+            &format!("blk.{blk}.ffn_gate_exps.weight"),
+            &[16_000_000, 128, 8],
+            12,
+        ));
+    }
+
+    out.extend_from_slice(&(tensors.len() as u64).to_le_bytes());
+    out.extend_from_slice(&(kvs.len() as u64).to_le_bytes());
+    for (_key, _ty, payload) in &kvs {
+        out.extend_from_slice(&(_key.len() as u64).to_le_bytes());
+        out.extend_from_slice(_key.as_bytes());
+        out.extend_from_slice(&_ty.to_le_bytes());
+        out.extend_from_slice(payload);
+    }
+    for t in &tensors {
+        out.extend_from_slice(t);
+    }
+
+    let mut f = std::fs::File::create(path).expect("create moe fixture");
+    f.write_all(&out).expect("write moe fixture");
+}
+
+#[test]
+fn plan_local_moe_gguf_prints_llamacpp_command_on_fixture_hardware() {
+    let dir = std::env::temp_dir().join(format!("llmfit-plan-moe-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    let path = dir.join("fixture-moe-q4_k.gguf");
+    write_moe_gguf_fixture(&path);
+
+    // Fixture machine from FORK_GUIDE §1: RTX 3090-class VRAM + big DDR5.
+    let output = Command::cargo_bin("llmfit")
+        .expect("failed to locate llmfit test binary")
+        .args([
+            "--no-dashboard",
+            "--memory",
+            "24G",
+            "--ram",
+            "96G",
+            "--cpu-cores",
+            "16",
+            "plan",
+            path.to_str().expect("utf8 path"),
+            "--context",
+            "16384",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let stdout = String::from_utf8(output).expect("utf8 stdout");
+
+    assert!(
+        stdout.contains("Suggested llama.cpp command:"),
+        "plan must surface an actionable command:\n{stdout}"
+    );
+    assert!(stdout.contains("llama-server"), "{stdout}");
+    assert!(stdout.contains("-m "), "{stdout}");
+    assert!(stdout.contains("-c 16384"), "{stdout}");
+    assert!(stdout.contains("-fa"), "{stdout}");
+    // The fixture carries routed-expert tensors and the machine is
+    // GPU-constrained, so the command must contain a concrete MoE split.
+    assert!(
+        stdout.contains("--n-cpu-moe "),
+        "expected a concrete --n-cpu-moe split on constrained VRAM:\n{stdout}"
+    );
+
+    // JSON consumers get the same command as a first-class field.
+    let json = run_json_command(&[
+        "--no-dashboard",
+        "--json",
+        "--memory",
+        "24G",
+        "--ram",
+        "96G",
+        "plan",
+        path.to_str().unwrap(),
+        "--context",
+        "16384",
+    ]);
+    let cmd = json["llamacpp_command"]
+        .as_str()
+        .expect("JSON plan must carry llamacpp_command");
+    assert!(cmd.contains("--n-cpu-moe "), "{cmd}");
+
+    std::fs::remove_dir_all(&dir).ok();
+}
