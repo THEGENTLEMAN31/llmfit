@@ -894,7 +894,10 @@ pub fn display_model_plan(plan: &PlanEstimate) {
             );
         }
         if let Some(tps) = path.estimated_tps {
-            println!("    est speed: {:.1} tok/s", tps);
+            // V0-incertitude: plan paths render from RunPath, not ModelFit —
+            // apply the same documented ±25% empirical band here.
+            let range = llmfit_core::fit::TpsRange::empirical(tps);
+            println!("    est speed: {:.1} tok/s ({})", tps, range.compact());
         }
     }
     println!();
