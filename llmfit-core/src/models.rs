@@ -62,28 +62,14 @@ pub fn quant_speed_multiplier(quant: &str) -> f64 {
 }
 
 /// Bytes per parameter for a given quantization format.
-/// Used by the bandwidth-based tok/s estimator to compute model size in GB.
+///
+/// Single source of truth shared with `quant_bpp`: memory sizing and the
+/// bandwidth-based tok/s estimator MUST agree on how dense a given quant
+/// file is, otherwise speed estimates are computed from a model size that
+/// contradicts the reported one (fork audit V0-bpp). The empirical speed
+/// calibration lives in `quant_speed_multiplier`, not here.
 pub fn quant_bytes_per_param(quant: &str) -> f64 {
-    match quant {
-        "F16" | "BF16" => 2.0,
-        "Q8_0" => 1.0,
-        "Q6_K" => 0.75,
-        "Q5_K_M" => 0.625,
-        "Q4_K_M" | "Q4_0" => 0.5,
-        "Q3_K_M" => 0.375,
-        "Q2_K" => 0.25,
-        "UD-Q2_K_XL" | "UD-Q2_K_L" | "UD-Q2_K_M" | "UD-Q2_K_S" => 0.25,
-        "UD-Q3_K_XL" | "UD-Q3_K_L" | "UD-Q3_K_M" | "UD-Q3_K_S" => 0.375,
-        "UD-Q4_K_XL" | "UD-Q4_K_L" | "UD-Q4_K_M" | "UD-Q4_K_S" => 0.5,
-        "UD-Q5_K_XL" | "UD-Q5_K_L" | "UD-Q5_K_M" | "UD-Q5_K_S" => 0.625,
-        "UD-Q6_K_XL" | "UD-Q6_K_L" | "UD-Q6_K_M" | "UD-Q6_K_S" => 0.75,
-        "UD-Q8_K_XL" | "UD-Q8_K_L" | "UD-Q8_K_M" | "UD-Q8_K_S" => 1.0,
-        "mlx-4bit" => 0.5,
-        "mlx-8bit" => 1.0,
-        "AWQ-4bit" | "GPTQ-Int4" | "AutoRound-4bit" => 0.5,
-        "AWQ-8bit" | "GPTQ-Int8" | "AutoRound-8bit" => 1.0,
-        _ => 0.5, // default to ~4-bit
-    }
+    quant_bpp(quant)
 }
 
 /// Quality penalty for quantization (lower quant = lower quality).
@@ -1939,8 +1925,40 @@ mod tests {
         );
         assert!(
             quant_bytes_per_param("UD-Q2_K_XL") < 0.4,
-            "UD-Q2_K_XL bytes should be 0.25, not default 0.5"
+            "UD-Q2_K_XL bytes should be 0.37, not default 0.58"
         );
+
+        // Unified density table: the speed estimator must read the SAME
+        // bytes-per-param as memory sizing for every known format
+        // (fork audit V0-bpp).
+        for q in [
+            "F32",
+            "F16",
+            "BF16",
+            "Q8_0",
+            "Q6_K",
+            "Q5_K_M",
+            "Q4_K_M",
+            "Q4_0",
+            "Q3_K_M",
+            "Q2_K",
+            "UD-Q2_K_XL",
+            "UD-Q4_K_M",
+            "UD-Q8_K_S",
+            "mlx-4bit",
+            "mlx-8bit",
+            "AWQ-4bit",
+            "GPTQ-Int4",
+            "AutoRound-4bit",
+            "AutoRound-8bit",
+            "something-unheard-of",
+        ] {
+            assert_eq!(
+                quant_bpp(q),
+                quant_bytes_per_param(q),
+                "{q}: speed and memory tables disagree"
+            );
+        }
     }
 
     #[test]

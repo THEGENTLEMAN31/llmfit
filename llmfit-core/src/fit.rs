@@ -3096,10 +3096,11 @@ mod tests {
         // Hand-computed expectation for the MoE case (DDR side dominates).
         let bw = crate::hardware::gpu_memory_bandwidth_gbps("NVIDIA GeForce RTX 3090").unwrap();
         let bpp = models::quant_bytes_per_param("Q4_K_M");
+        let active_gb = 22.0 * bpp;
         let weights_gb = 235.0 * bpp;
         let spill = spill_fraction(weights_gb, 24.0 * HYBRID_VRAM_USABLE_FRACTION);
-        let expected =
-            1.0 / ((11.0 * (1.0 - spill)) / (bw * config.efficiency) + (11.0 * spill) / 50.0);
+        let expected = 1.0
+            / ((active_gb * (1.0 - spill)) / (bw * config.efficiency) + (active_gb * spill) / 50.0);
         assert!(
             (tps_moe - expected).abs() / expected < 0.05,
             "moe tps {tps_moe:.2} vs hand-computed {expected:.2}"
@@ -3946,9 +3947,9 @@ mod tests {
         //   - Models with shared experts (Qwen3.5, DeepSeek) overestimate
         //     because active_parameters doesn't count shared expert params
         //
-        // The formula uses quant_bpp (real GGUF size including metadata)
-        // rather than quant_bytes_per_param (theoretical), which gives
-        // better accuracy for typical Q4_K_M quantization.
+        // Since the V0-bpp unification, quant_bpp and quant_bytes_per_param
+        // read the same density table, so the MoE paths and the hybrid path
+        // agree on file sizes by construction.
         let fixtures = vec![
             // OLMoE-1B-7B: 6.92B total, ~1.7B active, 64/8 experts, Q4_K_M
             // Measured: 258.2 tok/s (llama-bench, 3 runs, ±0.9, exclusive GPU)
