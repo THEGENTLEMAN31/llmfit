@@ -99,10 +99,11 @@ Légère divergence avec le rapport initial : **le HEAD actuel contient déjà d
 - [x] **Catalogue purgé** : 34 entrées famille `deepseek_v3`/`deepseek_v32` (L=61) migrées vers MLA réel (512/64, head metadata effacées). Scraper patché (mêmes champs + précédence MLA) pour que la régénération préserve la migration. `schema.json` accepte les nouvelles clés. Famille `deepseek_v4` volontairement NON touchée (config non vérifiable — honnêteté).
 - [x] Critère : DeepSeek-R1 fp16 @32k = 61×576×32768×2 ≈ **2,15 GiB** (vs ~53 GiB avant → ~25× corrigé, conforme à l'audit). Tests : hand-calc, scaling quant, dégradation sans rope, purge catalogue embarquée.
 
-#### V0-bpp — Unifier les tables bpp — **OUVERT**
-- [ ] Deux tables divergentes : models.rs:~19-36 (`quant_bpp` défaut 0.58) vs models.rs:~70-85 (défaut 0.50) ; Q4_K_M = 0.58 vs 0.50 selon le chemin. Le scraper Python (scripts/) a sa propre table.
-- [ ] Créer UNE source unique (module `quants.rs` ou constante sérialisée partagée `data/quants.json` générée), consommée par Rust + Python. Table de référence : tailles réelles GGUF (gguf-py / wiki llama.cpp).
-- [ ] Critère : un seul endroit définit bpp ; tests croisés Rust/Python verts ; grep prouve l'absence de seconde table.
+#### V0-bpp — Unifier les tables bpp — **RÉSOLU (commit e56ba9f)**
+- [x] `quant_bytes_per_param` délègue à `quant_bpp` : **une seule table physique** (models.rs). Calibration empirique isolée dans `quant_speed_multiplier`. Valeurs retenues = celles de `quant_bpp` (Q4_K_M=0.58, plus proche des densités GGUF réelles).
+- [x] Test croisé sur tous les formats + fallback inconnu ; hand-calc du test MoE spillé dérivée de la table (plus de littéral 0.5 figé) ; commentaire obsolète fit.rs (~3950) corrigé.
+- [x] Effet : tok/s ~-13 % sur quants médians (0.50→0.58 B/param), direction conservatrice. Aucune estimation mémoire changée.
+- [ ] **Reporté (V1)** : table Python du scraper — il ne porte que l'heuristique RAM (`params*0.5*1.2`), pas une seconde table de densités ; alignement optionnel si le scraper est retouché.
 
 #### V0-incertitude — Fourchettes systématiques — **OUVERT**
 - [ ] Aucune sortie ponctuelle de tok/s ne reste sans intervalle. Base : les percentiles communautaires existent déjà (fit.rs:~2700-2745 : p10/median/p90 calculés mais non exposés).
@@ -178,7 +179,9 @@ Légère divergence avec le rapport initial : **le HEAD actuel contient déjà d
 ### 2026-08-23 — Session 1 — ✅ V0-C3 TERMINÉ (commit 44100e8)
 - MLA complet (modèle, KV formula, fetch HF, catalogue, scraper, schéma). R1 @32k fp16 : 53 GiB → 2,15 GiB. Workspace : **673 verts**, clippy 39 (inchangé), fmt OK.
 - Note : le guide estimait la vraie valeur KV à « 0,1-0,2 Go » — erreur arithmétique du guide ; la bonne ordre de grandeur est ~2 GiB (l'audit « ~25× » reste exact).
-- **NEXT** : V0-bpp (unifier les tables), puis V0-incertitude. Ensuite milestone/tag `v0-honnetete`.
+### 2026-08-23 — Session 1 (suite) — ✅ V0-bpp TERMINÉ (commit e56ba9f)
+- Table unique de densités ; 673 verts, clippy 39, fmt OK. Seul fallout : hand-calc du test MoE spillé (littéral 11 Go figé sur l'ancien bpp) → dérivé de la table.
+- **NEXT** : V0-incertitude (fourchettes p10-p90 / ±25 % exposées partout). Ensuite milestone `v0-honnetete` + push, puis V1-a (parsing GGUF local).
 
 ### 2026-08-23 — Session 1 — ✅ V0-C2 TERMINÉ (clos par V0-C1 + #924)
 - Verdict : la fuite « formule dense » du rapport (fit.rs:1410 v1.1.10) n'existe plus — le régime CpuOffload unifié de V0-C1 lit les octets actifs selon le split réel. Mode `MoeOffload` déjà physique et calibré amont. Aucun site `for_run_mode` résiduel illégitime (vérifié par grep exhaustif).
