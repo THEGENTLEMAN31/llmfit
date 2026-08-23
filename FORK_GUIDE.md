@@ -60,7 +60,7 @@ Différenciateur défendable : personne ne sort aujourd'hui une **commande compl
 | Branche de travail | `main` |
 | HEAD de départ | `3f44fd3` (= v1.1.10, même arbre que l'audit) |
 | Toolchain | cargo/rustc 1.97.1, Arch Linux |
-| Baseline build/test/clippy | ⏳ À MESURER à la première session (voir journal) |
+| Baseline build/test/clippy | ✅ build 3m23s · **565 tests verts** (1 ignored) · clippy **39 warnings pré-existants, 0 erreur** (règle : ne pas en AJOUTER) |
 
 ## 4. ROADMAP DÉTAILLÉE
 
@@ -154,6 +154,13 @@ Légère divergence avec le rapport initial : **le HEAD actuel contient déjà d
 - Re-audit express sur HEAD : **C1 OUVERT** (fit.rs:69 `cpu_offload: 0.5`) ; **C3 OUVERT** (zéro `kv_lora_rank` dans src/) ; **C2 PARTIEL** (#924 : plan.rs fallback utilise params actifs — à creuser pour le chemin spillé) ; tables bpp toujours divergentes (models.rs 2 tables) ; overhead plat 0,5 Go toujours là (models.rs:889).
 - Création de ce guide. Baseline build/test/clippy : à mesurer ci-dessous.
 - **NEXT** : baseline (§3), puis V0-C1.
+
+### 2026-08-23 — Session 1 — baseline + re-audit complet (terminés)
+- **Baseline mesurée** (cf. §3) : build release 3m23s ; `cargo test --workspace` = 565+6+1 verts, 0 échec ; clippy 39 warnings amont, 0 erreur.
+- **Re-audit des majeures sur HEAD** :
+  - M1 overhead plat : OUVERT (models.rs:889). M2 réserve affichage/memory.used : OUVERT (0 match). M9 PCIe/NVLink : OUVERT (0 match hardware.rs). M10 NUMA : OUVERT (0 match). M11 prefill/TTFT : OUVERT (seul un commentaire de doc dit « not estimated », fit.rs:226). M12 batch>1 rejeté du calibrage : CONFIRMÉ (benchmarks.rs `from_rows`). M13 mmproj : OUVERT (0 match). M5 SWA : OUVERT (0 match `sliding_window`).
+  - Conclusion : quasi tout le périmètre V0-V2 du rapport reste à faire sur ce HEAD ; C2 seul est partiellement couvert par #924.
+- **NEXT** : V0-C1 (modèle par couche offload CPU).
 
 ## 7. Pièges connus & références validées sur HEAD 3f44fd3
 
