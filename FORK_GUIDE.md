@@ -117,11 +117,11 @@ Légère divergence avec le rapport initial : **le HEAD actuel contient déjà d
 
 ### V1 « Introspection »
 
-#### V1-a — Parsing header GGUF local — **ABSENT**
-- [ ] Nouveau module `llmfit-core/src/gguf.rs` : port Rust minimal de gguf-py. Spec binaire : magic `GGUF` (u32 LE), version u32, `tensor_count` u64, `metadata_kv_count` u64, puis KVs typées (u8/16/32/64, i*, f32/f64, bool, string=u64+len, array). Parser SANS charger le corps des tenseurs (seek).
-- [ ] Clés collectées : `general.architecture/name`, `{arch}.block_count`, `.attention.head_count`, `.attention.head_count_kv`, `.attention.key_length/value_length`, `.attention.key_length` MLA (`{arch}.kv_lora_rank`, `{arch}.qk_rope_head_dim` si présent), `.expert_count`, `.expert_used_count`, `.expert_feed_forward_length`, `.context_length`, RoPE/YaRN, SWA (`{arch}.attention.sliding_window`). Type de tenseur PAR tenseur (enum ggml) → **vraie quant par couche**, fin du parsing par nom de fichier (providers.rs:1056-1083 devient fallback).
-- [ ] Sous-commande `llmfit audit <file.gguf>` : architecture, params, quant réelle (mixte possible), n_experts, empreinte mémoire estimée, KV par contexte.
-- [ ] Critère : audit correct sur ≥3 GGUF réels hétérogènes (petit dense, MoE, deepseek2 si dispo) ; tests unitaires avec fixtures binaires construites à la main.
+#### V1-a — Parsing header GGUF local — ✅ **TERMINÉ** (commit 84dd076)
+- [x] Nouveau module `llmfit-core/src/gguf.rs` : port Rust minimal de gguf-py. Spec binaire : magic `GGUF` (u32 LE), version u32, `tensor_count` u64, `metadata_kv_count` u64, puis KVs typées (u8/16/32/64, i*, f32/f64, bool, string=u64+len, array). Parser SANS charger le corps des tenseurs (seek).
+- [x] Clés collectées : `general.architecture/name`, `{arch}.block_count`, `.attention.head_count`, `.attention.head_count_kv`, `.attention.key_length/value_length`, `.attention.key_length` MLA (`{arch}.kv_lora_rank`, `{arch}.qk_rope_head_dim` si présent), `.expert_count`, `.expert_used_count`, `.expert_feed_forward_length`, `.context_length`, RoPE/YaRN, SWA (`{arch}.attention.sliding_window`). Type de tenseur PAR tenseur (enum ggml) → **vraie quant par couche**, fin du parsing par nom de fichier (providers.rs:1056-1083 devient fallback).
+- [x] Sous-commande `llmfit audit <file.gguf>` : architecture, params, quant réelle (mixte possible), n_experts, empreinte mémoire estimée, KV par contexte.
+- [x] Critère : audit correct sur ≥3 GGUF réels hétérogènes (petit dense, MoE, deepseek2 si dispo) ; tests unitaires avec fixtures binaires construites à la main.
 
 #### V1-b — Range-reads HTTP des headers sur CDN HF — **ABSENT**
 - [ ] `GET https://huggingface.co/{repo}/resolve/main/{file}` avec `Range: bytes=0-N` (redirection CDN suivie). Lire incrémentalement jusqu'au début des tensor infos, cap 4 Mo. Ne JAMAIS télécharger les poids.
@@ -189,6 +189,14 @@ Légère divergence avec le rapport initial : **le HEAD actuel contient déjà d
 - Verdict : la fuite « formule dense » du rapport (fit.rs:1410 v1.1.10) n'existe plus — le régime CpuOffload unifié de V0-C1 lit les octets actifs selon le split réel. Mode `MoeOffload` déjà physique et calibré amont. Aucun site `for_run_mode` résiduel illégitime (vérifié par grep exhaustif).
 - Test frontière ajouté : MoE quasi totalement spillé → roofline DDR actifs (`test_cpu_offload_fully_spilled_moe_hits_ddr_active_roofline`). Core : **571 verts**.
 - **NEXT** : V0-C3 (MLA DeepSeek + purge catalogue).
+
+### 2026-08-23 — Session 1 — ✅ V1-a TERMINÉ (commit 84dd076)
+- `llmfit-core/src/gguf.rs` (~1400 l.) : parser header GGUF v1/v3 générique sur `R: Read` (pas de `Seek` — skip par lectures bornées de 8 Ko, prêt pour les range-reads HTTP de V1-b) ; enum ggml complet (ids vérifiés dans ggml.h + tailles de blocs dans GGML_QUANT_SIZES de gguf-py, gaps 4-5/31-33/36-38 exclus) ; types inconnus → reportés (`unknown_type_tensors`), jamais devinés ; caps défensives (string 64 MiB, dims ≤16). 14 tests unitaires sur fixtures binaires écrites à la main (dense/GQA/MLA/MoE/YaRN/SWA/corrompus).
+- **Correction vs ce guide** : la clé MLA réelle du convertisseur est `{arch}.attention.kv_lora_rank` (pas `{arch}.kv_lora_rank`) ; le dim RoPE découplé vit dans `{arch}.rope.dimension_count` ; `attention.key_length = kv_lora_rank + qk_rope_head_dim`. Vérifié dans llama.cpp (convert_hf_to_gguf.py, llama-arch.cpp).
+- Sous-commande `llmfit audit <file.gguf>` (readonly, texte + `--json`), rendu dans display.rs, 2 tests CLI smoke. Critère rempli sur 3 vrais fichiers hétérogènes : stories260K (llama F32), Qwen2.5-0.5B « Q4_K_M » (**mix réel dominé par Q5_0 54,9 % — la détection par nom de fichier se trompait**, exactement le problème visé), bge-small-en-v1.5 q8_0 (bert MHA). MoE/deepseek2 réels non téléchargeables ici (≥4 Go) → chemins couverts par fixtures unitaires + ancre C3.
+- Interprétation « providers.rs:1056-1083 devient fallback » : `select_best_gguf` opère sur des listings distants (headers indisponibles avant V1-b) → rien à changer en V1-a ; `audit` lit déjà les vrais headers.
+- Workspace : **692 verts**, clippy : zéro nouveau warning sur le code ajouté (baseline amont inchangée), fmt OK.
+- **NEXT** : V1-b (range-reads HTTP des headers HF).
 
 ## 7. Pièges connus & références validées sur HEAD 3f44fd3
 
