@@ -109,6 +109,7 @@ Légère divergence avec le rapport initial : **le HEAD actuel contient déjà d
 - [x] `MeasuredTps` + `p10/p90` (percentiles interpolés, serde-default → caches locaux compatibles). Nouveau type `TpsRange{low,high,source}` : CommunitySamples si ≥3 runs, sinon bande ±25 % documentée (calée sur le résidu est/mesuré 0.67–1.19).
 - [x] `ModelFit.tps_range` initialisé à la construction (bande empirique autour de l'estimation) puis rafraîchi via `set_tps_range()` aux 6 sites d'annotation (analysis, TUI build/re-annotate/sim ×2, CLI mono-modèle). Helper `displayed_tps()`.
 - [x] Surfaces couvertes : colonne « tok/s range » tableau CLI (« 11–14 »), vue plan (« Expected range: … »), détail TUI, payloads REST/API/MCP (`tps_range{low,high,source}`).
+- [x] **Complément (d25d40b, revue utilisateur)** : la sous-commande `plan` rend depuis `RunPath.estimated_tps`, pas `ModelFit.tps_range` — bande ±25 % appliquée au rendu : `est speed: 34.7 tok/s (26–43)`.
 - [x] Tests : interpolation percentiles, sélection community/empirical, run unique local → bande autour du point mesuré, rendu compact.
 - [ ] **Suivis cosmétiques (V1)** : colonne CSV additive, deltas des vues compare TUI (garder numériques — delta de fourchette non défini), snapshot CLI complet.
 
