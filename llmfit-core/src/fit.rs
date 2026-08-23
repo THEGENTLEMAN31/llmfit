@@ -1140,6 +1140,20 @@ const VRAM_PRESSURE_PENALTY_FLOOR: f64 = 0.30;
 /// Conservative 50% — assumes half the experts are inactive on average.
 const VRAM_PRESSURE_DEFAULT_EXPERT_RATIO: f64 = 0.50;
 
+/// Fraction of VRAM treated as usable for model weights on the hybrid CPU+GPU
+/// path. Covers KV cache, CUDA context and allocator slack that the layer
+/// split must respect. Refined when per-context memory modeling lands.
+const HYBRID_VRAM_USABLE_FRACTION: f64 = 0.92;
+
+/// Fraction of total model weights that must live in system RAM given a
+/// usable VRAM budget. 0.0 means everything fits on GPU, 1.0 nothing does.
+fn spill_fraction(total_weights_gb: f64, usable_vram_gb: f64) -> f64 {
+    if total_weights_gb <= 0.0 {
+        return 1.0;
+    }
+    ((total_weights_gb - usable_vram_gb) / total_weights_gb).clamp(0.0, 1.0)
+}
+
 /// Print a debug line to stderr when LLMFIT_DEBUG env var is set.
 /// Usage: `LLMFIT_DEBUG=1 llmfit fit ...` to see which estimation path is taken.
 /// Uses a macro to avoid string allocation when debug logging is disabled (hot path).
@@ -1407,6 +1421,59 @@ pub(crate) fn estimate_tps(
             return (raw_tps * mode_factor * vram_pressure).max(0.1);
         }
 
+        // Hybrid CPU+GPU offload: per-layer additive model.
+        //
+        // llama.cpp-style -ngl splitting keeps some layers resident in VRAM and
+        // runs the rest on CPU. Layers execute sequentially within a token, so
+        // per-token time is ADDITIVE across the two pools:
+        //   t = active_resident_gb / (BW_vram * eff) + active_spilled_gb / DDR_BW
+        //
+        // The split fraction follows real capacity: total weights that do not
+        // fit usable VRAM live in RAM. Per-token READS still follow active
+        // parameters (a spilled MoE reads its active experts from wherever
+        // they reside). This replaces the former flat x0.5 factor applied to a
+        // full-VRAM-bandwidth estimate, which overestimated hybrid decode by
+        // roughly an order of magnitude on mid-range VRAM.
+        //
+        // PCIe weight streaming is intentionally NOT modeled here: resident-
+        // split runtimes do not stream weights per token; only negligible
+        // activation tensors cross the bus. A measured-PCIe streaming model is
+        // a later milestone.
+        if run_mode == RunMode::CpuOffload {
+            return match system
+                .total_gpu_vram_gb
+                .or(system.gpu_vram_gb)
+                .map(|v| v * HYBRID_VRAM_USABLE_FRACTION)
+                .filter(|v| *v > 0.0)
+            {
+                Some(vram) => {
+                    let total_weights_gb = model.params_b() * bytes_per_param;
+                    let spill = spill_fraction(total_weights_gb, vram);
+                    let ddr_bw = ddr_bandwidth_gbps(config);
+                    let gpu_time = (active_gb * (1.0 - spill)) / (bw * efficiency);
+                    let cpu_time = (active_gb * spill) / ddr_bw;
+                    debug_log!(
+                        "Hybrid offload: {} weights={:.1}GB vram={:.1}GB spill={:.2} \
+                         gpu_t={:.3}s cpu_t={:.3}s tps={:.2}",
+                        model.name,
+                        total_weights_gb,
+                        vram,
+                        spill,
+                        gpu_time,
+                        cpu_time,
+                        1.0 / (gpu_time + cpu_time)
+                    );
+                    (1.0 / (gpu_time + cpu_time)).max(0.1)
+                }
+                None => {
+                    // VRAM size unknown: the physical split cannot be resolved.
+                    // Fall back to the tunable factor instead of guessing one.
+                    let mode_factor = config.run_mode_factors.for_run_mode(run_mode);
+                    ((bw / active_gb) * efficiency * mode_factor).max(0.1)
+                }
+            };
+        }
+
         let raw_tps = (bw / active_gb) * efficiency;
 
         let mode_factor = config.run_mode_factors.for_run_mode(run_mode);
@@ -1458,6 +1525,33 @@ pub(crate) fn estimate_tps(
             base *= 1.1;
         }
         return base;
+    }
+
+    // Hybrid CPU+GPU offload mirrors the MoeOffload treatment: reconstruct an
+    // effective GPU bandwidth from the K constant, then apply the same
+    // additive split model as the bandwidth-based path above.
+    if run_mode == RunMode::CpuOffload {
+        let bytes_per_param = models::quant_bytes_per_param(quant);
+        let read_gb = params * bytes_per_param;
+        let total_weights_gb = model.params_b() * bytes_per_param;
+        let vram_for_weights = system
+            .total_gpu_vram_gb
+            .or(system.gpu_vram_gb)
+            .map(|v| v * HYBRID_VRAM_USABLE_FRACTION)
+            .filter(|v| *v > 0.0);
+        if let Some(vram) = vram_for_weights {
+            let spill = spill_fraction(total_weights_gb, vram);
+            let estimated_gpu_bw = k * bytes_per_param / fallback_efficiency;
+            let ddr_bw = ddr_bandwidth_gbps(config);
+            let gpu_time = (read_gb * (1.0 - spill)) / (estimated_gpu_bw * fallback_efficiency);
+            let cpu_time = (read_gb * spill) / ddr_bw;
+            base = (1.0 / (gpu_time + cpu_time)).max(0.1);
+            if system.total_cpu_cores >= 8 {
+                base *= 1.1;
+            }
+            return base;
+        }
+        // VRAM size unknown: keep the legacy tunable-factor path below.
     }
 
     // CPU-only should use CPU K regardless of detected GPU
@@ -2849,6 +2943,198 @@ mod tests {
         // All should be positive
         assert!(tps_gpu > 0.0);
         assert!(tps_cpu > 0.0);
+    }
+
+    #[test]
+    fn test_spill_fraction_clamps_and_monotonicity() {
+        assert_eq!(spill_fraction(10.0, 10.0), 0.0);
+        assert_eq!(spill_fraction(20.0, 10.0), 0.5);
+        assert_eq!(spill_fraction(10.0, 0.0), 1.0);
+        assert_eq!(spill_fraction(10.0, -5.0), 1.0);
+        assert_eq!(spill_fraction(0.0, 10.0), 1.0);
+        let mut prev = spill_fraction(10.0, 1.0);
+        for vram in [2.0, 4.0, 6.0, 8.0] {
+            let cur = spill_fraction(10.0, vram);
+            assert!(cur < prev, "spill must decrease as usable VRAM grows");
+            prev = cur;
+        }
+    }
+
+    #[test]
+    fn test_cpu_offload_hybrid_additive_split_rtx3090_70b() {
+        // Fork audit V0-C1 acceptance: RTX 3090 + Llama-70B-class dense model,
+        // partial offload must land in the low-single-digit tok/s band observed
+        // in llama.cpp discussion #4167-class measurements. The former x0.5
+        // factor on a full-VRAM-bandwidth roofline predicted ~7 tok/s here
+        // (>2x optimistic).
+        let model = test_model("70B", 45.0, Some(42.0));
+        let system = test_system_with_gpu(64.0, 24.0, "NVIDIA GeForce RTX 3090");
+        let config = test_config();
+
+        let tps = estimate_tps(
+            &model,
+            "Q4_K_M",
+            &system,
+            RunMode::CpuOffload,
+            InferenceRuntime::LlamaCpp,
+            &config,
+        );
+
+        // Recompute the expected additive split independently.
+        let bw = crate::hardware::gpu_memory_bandwidth_gbps("NVIDIA GeForce RTX 3090")
+            .expect("RTX 3090 must have a known bandwidth");
+        let bpp = models::quant_bytes_per_param("Q4_K_M");
+        let weights_gb = 70.0 * bpp;
+        let vram = 24.0 * HYBRID_VRAM_USABLE_FRACTION;
+        let spill = spill_fraction(weights_gb, vram);
+        let expected = 1.0
+            / ((weights_gb * (1.0 - spill)) / (bw * config.efficiency)
+                + (weights_gb * spill) / 50.0);
+
+        assert!(
+            (tps - expected).abs() / expected < 0.05,
+            "hybrid tps {tps:.2} must match the additive split model {expected:.2}"
+        );
+        assert!(
+            (1.2..=4.0).contains(&tps),
+            "hybrid decode must sit in the measured low-single-digit band, got {tps:.2}"
+        );
+    }
+
+    #[test]
+    fn test_cpu_offload_spilled_moe_reads_active_params_only() {
+        // A spilled MoE still reads only its active experts per token; the
+        // spill fraction is decided by TOTAL resident weights, not by active
+        // reads. Must be far faster than a dense model of the same total size.
+        let mut moe = test_model("235B", 130.0, Some(120.0));
+        moe.is_moe = true;
+        moe.active_parameters = Some(22_000_000_000);
+        let dense = test_model("235B", 130.0, Some(120.0));
+        let system = test_system_with_gpu(256.0, 24.0, "NVIDIA GeForce RTX 3090");
+        let config = test_config();
+
+        let tps_moe = estimate_tps(
+            &moe,
+            "Q4_K_M",
+            &system,
+            RunMode::CpuOffload,
+            InferenceRuntime::LlamaCpp,
+            &config,
+        );
+        let tps_dense = estimate_tps(
+            &dense,
+            "Q4_K_M",
+            &system,
+            RunMode::CpuOffload,
+            InferenceRuntime::LlamaCpp,
+            &config,
+        );
+
+        assert!(
+            tps_moe > tps_dense * 4.0,
+            "active-expert reads must dominate: moe={tps_moe:.2} dense={tps_dense:.2}"
+        );
+        // Hand-computed expectation for the MoE case (DDR side dominates).
+        let bw = crate::hardware::gpu_memory_bandwidth_gbps("NVIDIA GeForce RTX 3090").unwrap();
+        let bpp = models::quant_bytes_per_param("Q4_K_M");
+        let weights_gb = 235.0 * bpp;
+        let spill = spill_fraction(weights_gb, 24.0 * HYBRID_VRAM_USABLE_FRACTION);
+        let expected =
+            1.0 / ((11.0 * (1.0 - spill)) / (bw * config.efficiency) + (11.0 * spill) / 50.0);
+        assert!(
+            (tps_moe - expected).abs() / expected < 0.05,
+            "moe tps {tps_moe:.2} vs hand-computed {expected:.2}"
+        );
+    }
+
+    #[test]
+    fn test_cpu_offload_unknown_vram_keeps_tunable_factor() {
+        // Without any VRAM figure the physical split cannot be resolved; the
+        // estimate must fall back to the tunable legacy factor, not guess.
+        let model = test_model("70B", 45.0, None);
+        let mut system = test_system_with_gpu(64.0, 24.0, "NVIDIA GeForce RTX 3090");
+        system.total_gpu_vram_gb = None;
+        system.gpu_vram_gb = None;
+        let config = test_config();
+
+        let tps = estimate_tps(
+            &model,
+            "Q4_K_M",
+            &system,
+            RunMode::CpuOffload,
+            InferenceRuntime::LlamaCpp,
+            &config,
+        );
+
+        let bw = crate::hardware::gpu_memory_bandwidth_gbps("NVIDIA GeForce RTX 3090").unwrap();
+        let legacy = (bw / (70.0 * models::quant_bytes_per_param("Q4_K_M")))
+            * config.efficiency
+            * config.run_mode_factors.cpu_offload;
+        assert!(
+            (tps - legacy).abs() / legacy < 1e-6,
+            "unknown-VRAM fallback must equal the legacy factored estimate"
+        );
+    }
+
+    #[test]
+    fn test_cpu_offload_fallback_k_path_uses_additive_split() {
+        // Unrecognized GPU name -> fixed-constant path. With known VRAM the
+        // hybrid estimate must come from the additive split, not the flat
+        // factor, and must be dramatically lower than the legacy value.
+        let model = test_model("70B", 45.0, Some(42.0));
+        let mut system = test_system_with_gpu(64.0, 24.0, "Totally Unknown Accelerator");
+        system.backend = GpuBackend::Cuda;
+        let config = test_config();
+
+        let tps = estimate_tps(
+            &model,
+            "Q4_K_M",
+            &system,
+            RunMode::CpuOffload,
+            InferenceRuntime::LlamaCpp,
+            &config,
+        );
+        assert!(tps > 0.0 && tps.is_finite());
+
+        // Ordering sanity on the same fixtures: full-GPU (K path) must beat
+        // the hybrid split, and the hybrid split must beat CPU-only.
+        let tps_gpu = estimate_tps(
+            &model,
+            "Q4_K_M",
+            &system,
+            RunMode::Gpu,
+            InferenceRuntime::LlamaCpp,
+            &config,
+        );
+        let tps_cpu_only = estimate_tps(
+            &model,
+            "Q4_K_M",
+            &system,
+            RunMode::CpuOnly,
+            InferenceRuntime::LlamaCpp,
+            &config,
+        );
+        assert!(
+            tps < tps_gpu,
+            "hybrid ({tps:.2}) must be slower than full GPU ({tps_gpu:.2})"
+        );
+        assert!(
+            tps > tps_cpu_only,
+            "hybrid ({tps:.2}) must beat CPU-only ({tps_cpu_only:.2})"
+        );
+
+        // Hand-recomputed split for these exact fixtures.
+        let k = 220.0_f64; // CUDA constant
+        let bpp = models::quant_bytes_per_param("Q4_K_M");
+        let weights_gb = 70.0 * bpp;
+        let spill = spill_fraction(weights_gb, 24.0 * HYBRID_VRAM_USABLE_FRACTION);
+        let estimated_bw = k * bpp / 0.55;
+        let expected = 1.1
+            / ((weights_gb * (1.0 - spill)) / (estimated_bw * 0.55) + (weights_gb * spill) / 50.0);
+        assert!(
+            (tps - expected).abs() / expected < 0.05,
+            "fallback split tps {tps:.2} vs hand-computed {expected:.2}"
+        );
     }
 
     #[test]
