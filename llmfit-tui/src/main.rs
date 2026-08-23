@@ -412,6 +412,40 @@ AGENT USAGE:
         model: String,
     },
 
+    /// Inspect a local GGUF file by parsing its header (no model load)
+    #[command(long_about = "\
+Inspect a local GGUF file by parsing its header directly.
+
+Reports architecture parameters read from the real metadata keys, the exact
+per-tensor quantization mix with weight byte counts, expert configuration,
+RoPE/YaRN/sliding-window settings, and KV cache estimates at several context
+lengths. Tensor data is never read: auditing a multi-GB file costs a few KB.
+
+For sharded files, run on the first shard (it carries the header metadata).
+
+PRECONDITIONS:
+  FILE must be a readable GGUF file (magic 'GGUF', version 1-3).
+
+SIDE EFFECTS:
+  None — read-only.
+
+EXIT CODES:
+  0  Success
+  1  File unreadable or not a valid GGUF header
+
+AGENT USAGE:
+  llmfit audit ./model-Q4_K_M.gguf --json
+
+  JSON output fields: { file: { path, size_bytes }, summary: { architecture,
+  block_count, attention_heads, key_value_heads, context_length,
+  expert_count, expert_used_count, kv_lora_rank, total_parameters,
+  active_parameters, weights_bytes, quant_mix: [{ label, bytes, share }],
+  layer_quants: [{ first_block, last_block, attention, ffn }], ... } }")]
+    Audit {
+        /// Path to the .gguf file to inspect
+        path: String,
+    },
+
     /// Compare two models side-by-side, or auto-compare top N filtered models
     #[command(long_about = "\
 Compare two models side-by-side, or auto-compare top N filtered models.
@@ -944,6 +978,7 @@ fn is_readonly_subcommand(command: &Commands) -> bool {
         Commands::System
             | Commands::Doctor
             | Commands::Info { .. }
+            | Commands::Audit { .. }
             | Commands::Diff { .. }
             | Commands::Plan { .. }
             | Commands::Recommend { .. }
@@ -2004,6 +2039,17 @@ fn run_model(model: &str, server: bool, port: u16, ngl: i32, ctx_size: u32) {
     }
 }
 
+fn run_audit(path: &str, json: bool) -> Result<(), String> {
+    let file = llmfit_core::gguf::GgufFile::open(std::path::Path::new(path))?;
+    let summary = llmfit_core::gguf::GgufModelSummary::from_header(&file.header);
+    if json {
+        display::display_json_gguf_audit(&file, &summary);
+    } else {
+        display::display_gguf_audit(&file, &summary);
+    }
+    Ok(())
+}
+
 fn run_plan(
     model_selector: &str,
     context: u32,
@@ -2947,6 +2993,14 @@ fn main() {
                     display::display_model_detail(&fit);
                 }
             }
+
+            Commands::Audit { path } => match run_audit(&path, cli.json) {
+                Ok(()) => {}
+                Err(err) => {
+                    eprintln!("Error: {}", err);
+                    std::process::exit(1);
+                }
+            },
 
             Commands::Diff {
                 model_a,

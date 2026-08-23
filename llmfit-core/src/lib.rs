@@ -4,6 +4,7 @@ pub mod benchmarks;
 pub mod claim;
 pub mod doctor;
 pub mod fit;
+pub mod gguf;
 pub mod hardware;
 pub mod models;
 pub mod plan;

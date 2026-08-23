@@ -3,6 +3,7 @@ use std::sync::OnceLock;
 
 use colored::*;
 use llmfit_core::fit::{FitLevel, ModelFit, RunMode, SortColumn};
+use llmfit_core::gguf::GgufModelSummary;
 use llmfit_core::hardware::SystemSpecs;
 use llmfit_core::models::LlmModel;
 use llmfit_core::plan::PlanEstimate;
@@ -943,6 +944,216 @@ pub fn display_json_plan(plan: &PlanEstimate) {
     println!(
         "{}",
         serde_json::to_string_pretty(plan).expect("JSON serialization failed")
+    );
+}
+
+// ────────────────────────────────────────────────────────────────────
+// GGUF header audit
+// ────────────────────────────────────────────────────────────────────
+
+fn gib(bytes: u64) -> f64 {
+    bytes as f64 / (1024.0 * 1024.0 * 1024.0)
+}
+
+/// Render the audit of one GGUF file as aligned text sections.
+pub fn display_gguf_audit(file: &llmfit_core::gguf::GgufFile, s: &GgufModelSummary) {
+    let title = s.model_name.clone().unwrap_or_else(|| {
+        file.path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    });
+    println!(
+        "\n{}",
+        format!("=== {} (GGUF audit) ===", title).bold().cyan()
+    );
+
+    println!("{}", "File:".bold().underline());
+    println!("  Path: {}", file.path.display());
+    println!("  Size: {:.2} GiB", gib(file.file_size_bytes));
+    println!("  GGUF version: {}", s.gguf_version);
+    println!("  Tensors: {}", s.tensor_count);
+
+    println!(
+        "{}",
+        format!(
+            "Architecture ({}):",
+            s.architecture.as_deref().unwrap_or("unknown")
+        )
+        .bold()
+        .underline()
+    );
+    match (
+        s.block_count,
+        s.attention_heads,
+        s.key_value_heads,
+        s.key_length.or(s.value_length),
+    ) {
+        (Some(layers), Some(heads), kv_heads, head_dim) => {
+            let kv_txt = match kv_heads {
+                Some(kv) if kv < heads => format!(", {} KV (GQA)", kv),
+                _ => String::new(),
+            };
+            print!("  Layers: {:<8} Heads: {}", layers, heads);
+            print!("{}", kv_txt);
+            if let Some(dim) = head_dim {
+                println!(", head_dim {}", dim);
+            } else {
+                println!();
+            }
+        }
+        _ => println!("  Architecture parameters incomplete in this header"),
+    }
+    if let (Some(embedding), Some(ffn)) = (s.embedding_length, s.feed_forward_length) {
+        println!("  Embedding: {:<8} FFN: {}", embedding, ffn);
+    }
+    if s.has_routed_experts {
+        println!(
+            "  Experts: {} total, {} active per token{}",
+            s.expert_count.map_or("?".into(), |v| v.to_string()),
+            s.expert_used_count.map_or("?".into(), |v| v.to_string()),
+            s.expert_feed_forward_length
+                .map_or_else(String::new, |ffn| format!(", expert FFN {}", ffn))
+        );
+    }
+    if let Some((rank, rope)) = s.kv_lora_rank.zip(s.rope_dimension_count) {
+        println!(
+            "  Attention: MLA (kv_lora_rank {}, decoupled rope {})",
+            rank, rope
+        );
+    }
+    let mut rope_line = String::new();
+    if let Some(base) = s.rope_freq_base {
+        rope_line.push_str(&format!("RoPE base: {:.0}", base));
+    }
+    if let Some(kind) = &s.rope_scaling_type {
+        rope_line.push_str(&format!(
+            "  Scaling: {} x{}",
+            kind,
+            s.rope_scaling_factor.unwrap_or(1.0)
+        ));
+    }
+    if !rope_line.is_empty() {
+        println!("  {}", rope_line.trim_start());
+    }
+    if let Some(window) = s.sliding_window {
+        println!("  Sliding window: {} tokens", window);
+    }
+    if let Some(ctx) = s.context_length {
+        println!(
+            "  Trained context: {} tokens{}",
+            ctx,
+            s.rope_original_context_length
+                .map_or_else(String::new, |orig| format!(" (base {}){}", orig, ""))
+        );
+    }
+
+    println!(
+        "{}",
+        "Quantization (per real tensor types):".bold().underline()
+    );
+    match s.dominant_quant() {
+        Some(dominant) => println!(
+            "  Dominant: {} ({:.1}% of weights)",
+            dominant.label,
+            dominant.share * 100.0
+        ),
+        None => println!("  No tensors with known ggml types"),
+    }
+    for q in &s.quant_mix {
+        println!(
+            "  {:<10} {:>6.1}%  ({:.2} GiB)",
+            q.label,
+            q.share * 100.0,
+            gib(q.bytes)
+        );
+    }
+    for t in &s.unknown_type_tensors {
+        println!(
+            "  UNKNOWN type {}: {} excluded from byte totals",
+            t.type_id, t.name
+        );
+    }
+    if !s.layer_quants.is_empty() {
+        println!("  Per layer:");
+        println!("    {:<12} {:<10} ffn", "blocks", "attn");
+        for run in &s.layer_quants {
+            println!(
+                "    {:<12} {:<10} {}",
+                format_block_range(run.first_block, run.last_block),
+                run.attention,
+                run.ffn
+            );
+        }
+    }
+
+    println!("{}", "Memory:".bold().underline());
+    println!(
+        "  Weights (exact from tensor index): {:.2} GiB",
+        gib(s.weights_bytes)
+    );
+    let c = &s.components;
+    println!(
+        "    embeddings {:.2}  output {:.2}  attention {:.2}",
+        gib(c.embeddings),
+        gib(c.output_head),
+        gib(c.attention)
+    );
+    println!(
+        "    dense ffn  {:.2}  experts {:.2}  other {:.2}",
+        gib(c.dense_ffn),
+        gib(c.routed_experts),
+        gib(c.other)
+    );
+    match s.active_parameters {
+        Some(active) => println!(
+            "  Parameters: {:.3} B total, {:.3} B active",
+            s.total_parameters as f64 / 1e9,
+            active as f64 / 1e9
+        ),
+        None => println!(
+            "  Parameters: {:.3} B total (active unknown: expert metadata missing)",
+            s.total_parameters as f64 / 1e9
+        ),
+    }
+
+    println!("{}", "KV cache at fp16:".bold().underline());
+    let contexts = [4096u64, 16384, 32768, s.context_length.unwrap_or(0)];
+    let mut seen = std::collections::BTreeSet::new();
+    for ctx in contexts {
+        if ctx == 0 || !seen.insert(ctx) {
+            continue;
+        }
+        match s.kv_cache_gib_at(ctx) {
+            Ok(gib_value) => println!("    @{:<7} {:.2} GiB", ctx, gib_value),
+            Err(reason) => {
+                println!("    unavailable: {}", reason);
+                break;
+            }
+        }
+    }
+}
+
+fn format_block_range(first: u32, last: u32) -> String {
+    if first == last {
+        format!("blk {}", first)
+    } else {
+        format!("blk {}-{}", first, last)
+    }
+}
+
+/// Serialize the audit as JSON to stdout.
+pub fn display_json_gguf_audit(file: &llmfit_core::gguf::GgufFile, summary: &GgufModelSummary) {
+    let payload = serde_json::json!({
+        "file": {
+            "path": file.path.display().to_string(),
+            "size_bytes": file.file_size_bytes,
+        },
+        "summary": summary,
+    });
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&payload).expect("JSON serialization failed")
     );
 }
 

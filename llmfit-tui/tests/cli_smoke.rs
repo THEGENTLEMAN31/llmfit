@@ -225,3 +225,116 @@ fn cpu_cores_parser_rejects_zero() {
         .assert()
         .failure();
 }
+
+// ─── gguf audit ─────────────────────────────────────────────────────────────
+
+/// Hand-assembled minimal GGUF v3 header (llama arch, mixed quant tensors).
+fn write_gguf_fixture(path: &std::path::Path) {
+    use std::io::Write;
+
+    let mut out = Vec::new();
+    out.extend_from_slice(b"GGUF");
+    out.extend_from_slice(&3u32.to_le_bytes());
+
+    let kvs: Vec<(String, u32, Vec<u8>)> = vec![
+        ("general.architecture".into(), 8, {
+            let v = b"llama";
+            let mut b = (v.len() as u64).to_le_bytes().to_vec();
+            b.extend_from_slice(v);
+            b
+        }),
+        ("llama.block_count".into(), 4, 2u32.to_le_bytes().to_vec()),
+        (
+            "llama.attention.head_count".into(),
+            4,
+            8u32.to_le_bytes().to_vec(),
+        ),
+        (
+            "llama.attention.head_count_kv".into(),
+            4,
+            4u32.to_le_bytes().to_vec(),
+        ),
+        (
+            "llama.context_length".into(),
+            4,
+            4096u32.to_le_bytes().to_vec(),
+        ),
+    ];
+
+    let tensor = |name: &str, dims: &[u64], ty: u32| -> Vec<u8> {
+        let mut b = (name.len() as u64).to_le_bytes().to_vec();
+        b.extend_from_slice(name.as_bytes());
+        b.extend_from_slice(&(dims.len() as u32).to_le_bytes());
+        for d in dims {
+            b.extend_from_slice(&d.to_le_bytes());
+        }
+        b.extend_from_slice(&ty.to_le_bytes());
+        b.extend_from_slice(&0u64.to_le_bytes());
+        b
+    };
+
+    let tensors = vec![
+        tensor("token_embd.weight", &[256, 128], 1),    // F16
+        tensor("blk.0.attn_q.weight", &[128, 128], 12), // Q4_K
+        tensor("blk.0.ffn_down.weight", &[128, 512], 12),
+        tensor("blk.1.attn_q.weight", &[128, 128], 12),
+        tensor("blk.1.ffn_down.weight", &[128, 512], 12),
+    ];
+
+    out.extend_from_slice(&(tensors.len() as u64).to_le_bytes());
+    out.extend_from_slice(&(kvs.len() as u64).to_le_bytes());
+    for (_key, _ty, payload) in &kvs {
+        // key string then value type id then payload
+        let key = &_key; // silence unused warnings in tuple destructure above
+        out.extend_from_slice(&(key.len() as u64).to_le_bytes());
+        out.extend_from_slice(key.as_bytes());
+        out.extend_from_slice(&_ty.to_le_bytes());
+        out.extend_from_slice(payload);
+    }
+    for t in &tensors {
+        out.extend_from_slice(t);
+    }
+
+    let mut f = std::fs::File::create(path).expect("create fixture");
+    f.write_all(&out).expect("write fixture");
+}
+
+#[test]
+fn audit_json_reports_real_header_data() {
+    let dir = std::env::temp_dir().join(format!("llmfit-audit-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    let path = dir.join("fixture-q4_k_m.gguf");
+    write_gguf_fixture(&path);
+
+    let json = run_json_command(&[
+        "--no-dashboard",
+        "--json",
+        "audit",
+        path.to_str().expect("utf8 path"),
+    ]);
+
+    assert_eq!(json["summary"]["architecture"], "llama");
+    assert_eq!(json["summary"]["block_count"], 2);
+    assert_eq!(json["summary"]["attention_heads"], 8);
+    assert_eq!(json["summary"]["key_value_heads"], 4);
+    assert_eq!(json["summary"]["context_length"], 4096);
+    assert_eq!(json["summary"]["dominant_quant_label"], "Q4_K");
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn audit_rejects_non_gguf_file_with_error() {
+    let dir = std::env::temp_dir().join(format!("llmfit-audit-bad-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    let path = dir.join("not-a-model.gguf");
+    std::fs::write(&path, b"definitely not a gguf header").expect("write junk");
+
+    Command::cargo_bin("llmfit")
+        .expect("failed to locate llmfit test binary")
+        .args(["--no-dashboard", "audit", path.to_str().expect("utf8 path")])
+        .assert()
+        .failure();
+
+    std::fs::remove_dir_all(&dir).ok();
+}
