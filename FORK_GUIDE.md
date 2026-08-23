@@ -123,10 +123,10 @@ Légère divergence avec le rapport initial : **le HEAD actuel contient déjà d
 - [x] Sous-commande `llmfit audit <file.gguf>` : architecture, params, quant réelle (mixte possible), n_experts, empreinte mémoire estimée, KV par contexte.
 - [x] Critère : audit correct sur ≥3 GGUF réels hétérogènes (petit dense, MoE, deepseek2 si dispo) ; tests unitaires avec fixtures binaires construites à la main.
 
-#### V1-b — Range-reads HTTP des headers sur CDN HF — **ABSENT**
-- [ ] `GET https://huggingface.co/{repo}/resolve/main/{file}` avec `Range: bytes=0-N` (redirection CDN suivie). Lire incrémentalement jusqu'au début des tensor infos, cap 4 Mo. Ne JAMAIS télécharger les poids.
-- [] Intégration : quand le modèle n'est ni installé ni connu du catalogue → introspecter le dépôt HF (choix du fichier GGUF par variante de quant demandée).
-- [ ] Critère : introspection d'un gros MoE (ex. Qwen3-235B-GGUF) sans téléchargement >4 Mo, en <10 s réseau normal. Test d'intégration derrière feature flag réseau (ignorable hors-ligne).
+#### V1-b — Range-reads HTTP des headers sur CDN HF — ✅ **TERMINÉ** (commit 4874c77)
+- [x] `GET https://huggingface.co/{repo}/resolve/main/{file}` avec `Range: bytes=0-N` (redirection CDN suivie). Lire incrémentalement jusqu'au début des tensor infos, cap 4 Mo. Ne JAMAIS télécharger les poids.
+- [x] Intégration : quand le modèle n'est ni installé ni connu du catalogue → introspecter le dépôt HF (choix du fichier GGUF par variante de quant demandée).
+- [x] Critère : introspection d'un gros MoE (ex. Qwen3-235B-GGUF) sans téléchargement >4 Mo, en <10 s réseau normal. Test d'intégration derrière feature flag réseau (ignorable hors-ligne).
 
 #### V1-c — MLA/SWA réels + commande finale llama.cpp — **ABSENT**
 - [ ] Brancher les données introspectées (V1-a/b + config.json) dans le moteur : MLA (formule C3), SWA fenêtré (`sliding_window` → KV plafonnée à la fenêtre au-delà du prompt > fenêtre), YaRN (scaling du contexte).
@@ -198,6 +198,14 @@ Légère divergence avec le rapport initial : **le HEAD actuel contient déjà d
 - Workspace : **692 verts**, clippy : zéro nouveau warning sur le code ajouté (baseline amont inchangée), fmt OK.
 - **NEXT** : V1-b (range-reads HTTP des headers HF).
 
+### 2026-08-23 — Session 1 — ✅ V1-b TERMINÉ (commit 4874c77)
+- `llmfit-core/src/remote.rs` : `RangeReader` (Read+Seek paresseux sur requêtes Range). Redirection HF→CDN résolue **une seule fois** (URL signée réutilisée, max_redirects(0) + Location manuel) ; fenêtres adaptatives 4→16 Mio ; cap de transfert 32 Mio. Skips de gguf.rs migrés de « lectures scratch » vers `Seek` → les payloads fixed-width et le corps des tenseurs ne transitent JAMAIS sur le réseau.
+- **Écart vs guide (cap 4 Mo)** : irréaliste — les arrays de strings du tokenizer (`tokens`/`merges`) ont leurs préfixes de longueur entrelacés dans le payload, impossibles à sauter par range ; header réel mesuré **7,3–7,5 MiO** (Llama-3.2-1B, Qwen3-235B). Le cap devient garde-fou anti-téléchargement-de-poids (32 Mio), documenté dans remote.rs et §7.
+- Perf critère : 29,6 s → **~4-5 s** après résolution unique du redirect + gros chunks (~0,9 s de coût fixe/requête CDN, ~6 Mo/s soutenu). Critère Qwen3-235B-A22B : shard 1/9 (27,5 Gio annoncés), archi `qwen3moe` complète, 128 experts/8 actifs, 12 Mio transférés en ~5 s.
+- Intégration CLI : `audit` accepte chemin local / `owner/repo` (+ `--quant`, réutilise l'ordre de préférence du catalogue sans budget RAM) / URL directe. Sortie enrichie (repo file, URL, taille annoncée, octets transférés) ; fichiers sharded `-NNNNN-of-MMMMM` signalés (totaux = ce shard seulement).
+- Tests : 9 unitaires offline (serveur TCP mock ranges/302/cap) + 2 intégration réseau derrière `LLMFIT_NET_TESTS=1` (`#[ignore]`). Workspace : **702 verts**, clippy propre sur le nouveau code, fmt OK.
+- **NEXT** : V1-c (MLA/SWA réels + commande finale llama.cpp).
+
 ## 7. Pièges connus & références validées sur HEAD 3f44fd3
 
 | Fait | Référence | Attention |
@@ -206,6 +214,8 @@ Légère divergence avec le rapport initial : **le HEAD actuel contient déjà d
 | Tables bpp dupliquées/divergentes | models.rs ~19-36 vs ~70-85 | Q4_K_M 0.58 vs 0.50 selon chemin |
 | Overhead VRAM forfait plat | models.rs:889 (`let overhead = 0.5`) | pas de ctx CUDA/allocator/affichage |
 | Quant détectée par nom de fichier | providers.rs:1056-1083 | deviendra fallback après V1-a |
+| Header GGUF distant > 4 Mio (arrays tokenizer insécables) | remote.rs (mesuré 7,3–7,5 Mio : Llama-3.2-1B, Qwen3-235B) | cap réel 32 Mio = garde-fou anti-poids, pas budget strict |
+| Coût fixe ~0,9 s/requête sur CDN HF | mesure curl V1-b (us.aws.cdn.hf.co) | gros chunks + redirect résolu 1 fois, sinon lent |
 | Calibrage rejette batch>1 | benchmarks.rs:452-464 | lever en V2-d |
 | Percentiles communautaires non exposés | fit.rs ~2714 (p10/median/p90) | base de V0-incertitude |
 | Tolerance tests perf existants | fit.rs ~3702 (±30 % Q4_K_M, ±50 % sinon) | garder cohérents |
