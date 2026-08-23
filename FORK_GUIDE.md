@@ -105,11 +105,12 @@ Légère divergence avec le rapport initial : **le HEAD actuel contient déjà d
 - [x] Effet : tok/s ~-13 % sur quants médians (0.50→0.58 B/param), direction conservatrice. Aucune estimation mémoire changée.
 - [ ] **Reporté (V1)** : table Python du scraper — il ne porte que l'heuristique RAM (`params*0.5*1.2`), pas une seconde table de densités ; alignement optionnel si le scraper est retouché.
 
-#### V0-incertitude — Fourchettes systématiques — **OUVERT**
-- [ ] Aucune sortie ponctuelle de tok/s ne reste sans intervalle. Base : les percentiles communautaires existent déjà (fit.rs:~2700-2745 : p10/median/p90 calculés mais non exposés).
-- [ ] Exposer `range` (p10-p90 quand ≥N échantillons communautaires pour le slug matériel, sinon ±25 % documenté) dans : CLI fit/plan, API REST, lib.
-- [ ] Format « 11–14 tok/s ». Jamais de valeur seule.
-- [ ] Critère : toute sortie débit des sous-commandes affiche une fourchette ; test snapshot.
+#### V0-incertitude — Fourchettes systématiques — **RÉSOLU (commit 6d6d967)**
+- [x] `MeasuredTps` + `p10/p90` (percentiles interpolés, serde-default → caches locaux compatibles). Nouveau type `TpsRange{low,high,source}` : CommunitySamples si ≥3 runs, sinon bande ±25 % documentée (calée sur le résidu est/mesuré 0.67–1.19).
+- [x] `ModelFit.tps_range` initialisé à la construction (bande empirique autour de l'estimation) puis rafraîchi via `set_tps_range()` aux 6 sites d'annotation (analysis, TUI build/re-annotate/sim ×2, CLI mono-modèle). Helper `displayed_tps()`.
+- [x] Surfaces couvertes : colonne « tok/s range » tableau CLI (« 11–14 »), vue plan (« Expected range: … »), détail TUI, payloads REST/API/MCP (`tps_range{low,high,source}`).
+- [x] Tests : interpolation percentiles, sélection community/empirical, run unique local → bande autour du point mesuré, rendu compact.
+- [ ] **Suivis cosmétiques (V1)** : colonne CSV additive, deltas des vues compare TUI (garder numériques — delta de fourchette non défini), snapshot CLI complet.
 
 **Milestone V0 : tag `v0-honnetete` + push.**
 
@@ -181,7 +182,7 @@ Légère divergence avec le rapport initial : **le HEAD actuel contient déjà d
 - Note : le guide estimait la vraie valeur KV à « 0,1-0,2 Go » — erreur arithmétique du guide ; la bonne ordre de grandeur est ~2 GiB (l'audit « ~25× » reste exact).
 ### 2026-08-23 — Session 1 (suite) — ✅ V0-bpp TERMINÉ (commit e56ba9f)
 - Table unique de densités ; 673 verts, clippy 39, fmt OK. Seul fallout : hand-calc du test MoE spillé (littéral 11 Go figé sur l'ancien bpp) → dérivé de la table.
-- **NEXT** : V0-incertitude (fourchettes p10-p90 / ±25 % exposées partout). Ensuite milestone `v0-honnetete` + push, puis V1-a (parsing GGUF local).
+- **NEXT** : **V0 TERMINÉ** → milestone `v0-honnetete` (tag sur HEAD, message récap C1/C2/C3/bpp/incertitude), push. Puis V1-a (parsing GGUF local — providers.rs fallback détection quant par nom de fichier).
 
 ### 2026-08-23 — Session 1 — ✅ V0-C2 TERMINÉ (clos par V0-C1 + #924)
 - Verdict : la fuite « formule dense » du rapport (fit.rs:1410 v1.1.10) n'existe plus — le régime CpuOffload unifié de V0-C1 lit les octets actifs selon le split réel. Mode `MoeOffload` déjà physique et calibré amont. Aucun site `for_run_mode` résiduel illégitime (vérifié par grep exhaustif).
