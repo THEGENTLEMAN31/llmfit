@@ -3002,6 +3002,60 @@ mod tests {
     }
 
     #[test]
+    fn test_cpu_offload_fully_spilled_moe_hits_ddr_active_roofline() {
+        // Fork audit V0-C2 acceptance: a MoE that spills almost entirely must
+        // converge to the DDR roofline over ACTIVE parameters — not the dense
+        // total-params formula that used to underestimate speed by 4-6x.
+        let mut moe = test_model("80B", 45.0, Some(42.0));
+        moe.is_moe = true;
+        moe.active_parameters = Some(3_300_000_000);
+        let system = test_system_with_gpu(64.0, 2.0, "NVIDIA GeForce RTX 4090");
+        let config = test_config();
+
+        let tps = estimate_tps(
+            &moe,
+            "Q4_K_M",
+            &system,
+            RunMode::CpuOffload,
+            InferenceRuntime::LlamaCpp,
+            &config,
+        );
+
+        let bw = crate::hardware::gpu_memory_bandwidth_gbps("NVIDIA GeForce RTX 4090").unwrap();
+        let bpp = models::quant_bytes_per_param("Q4_K_M");
+        let weights_gb = 80.0 * bpp;
+        let spill = spill_fraction(weights_gb, 2.0 * HYBRID_VRAM_USABLE_FRACTION);
+        let active_gb = 3.3 * bpp;
+        let expected = 1.0 / ((active_gb * (1.0 - spill)) / (bw * config.efficiency)
+            + (active_gb * spill)
+                / 50.0);
+        assert!(
+            (tps - expected).abs() / expected < 0.05,
+            "fully-spilled moe tps {tps:.2} vs hand-computed {expected:.2}"
+        );
+        // Cannot exceed the pure DDR streaming bound by more than rounding.
+        assert!(
+            tps < 50.0 / (active_gb * spill) * 1.02,
+            "spilled decode is DDR-bound: {tps:.2}"
+        );
+
+        // Same footprint as a DENSE 80B: sparse active reads must be far faster.
+        let dense = test_model("80B", 45.0, Some(42.0));
+        let tps_dense = estimate_tps(
+            &dense,
+            "Q4_K_M",
+            &system,
+            RunMode::CpuOffload,
+            InferenceRuntime::LlamaCpp,
+            &config,
+        );
+        assert!(
+            tps > tps_dense * 8.0,
+            "sparse spill ({tps:.2}) must crush dense-spill estimate ({tps_dense:.2})"
+        );
+    }
+
+    #[test]
     fn test_cpu_offload_spilled_moe_reads_active_params_only() {
         // A spilled MoE still reads only its active experts per token; the
         // spill fraction is decided by TOTAL resident weights, not by active

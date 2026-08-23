@@ -87,10 +87,11 @@ Légère divergence avec le rapport initial : **le HEAD actuel contient déjà d
   ```
   Pas de terme PCIe en V0 (les poids ne sont PAS streamés par token dans ce régime ; seules les activations négligeables traversent le bus). Le streaming mesuré-PCIe reste en V2-a. `plan.rs` délègue à `estimate_tps` quand la BW GPU est connue → hérite automatiquement du fix ; son propre fallback K garde les facteurs (pas de données BW là).
 
-#### V0-C2 — Chemin MoE entièrement spillé — **PARTIEL (fix #924 amont)** 
-- [ ] Re-vérifier précisément ce que #924 couvre (commentaire plan.rs:225-240 : fallback utilise params actifs). Identifier si le cas « experts en RAM + attention sur GPU » a un roofline DDR dédié ou tombe encore dans la formule dense (rapport : fit.rs:889-893→1231→1410 sur v1.1.10).
-- [ ] Si insuffisant : implémenter `t_token = max(partie_GPU, partie_DDR_streamée)` avec `partie_DDR = taille_experts_actifs_par_token / BW_ddr`. Distribution d'activation : nb_experts_actifs du catalogue (`active_parameters`, `is_moe`).
-- [ ] Critère : Mixtral-8x22B / Qwen3-235B spillés → erreur < 40 % vs #4167. Tests unitaires.
+#### V0-C2 — Chemin MoE entièrement spillé — **RÉSOLU (V0-C1 unifié + #924 amont)** 
+- [x] Re-vérifier précisément ce que #924 couvre (commentaire plan.rs:225-240 : fallback utilise params actifs). Identifier si le cas « experts en RAM + attention sur GPU » a un roofline DDR dédié ou tombe encore dans la formule dense (rapport : fit.rs:889-893→1231→1410 sur v1.1.10).
+  - Verdict à HEAD : la fuite « formule dense » dans `estimate_tps` est **éliminée par le fix V0-C1** (le régime CpuOffload lit désormais les octets ACTIFS répartis selon le split réel, dense et MoE confondus). Le mode dédié `MoeOffload` avait déjà son roofline DDR additif validé amont (Qwen3-Next : est 15.2 vs meas 15.4). `plan.rs` délègue à `estimate_tps` dès que la BW GPU est connue (#924), sinon K-fallback documenté.
+- [x] ~~Si insuffisant~~ — couvert ; voir test frontière ci-dessous.
+- [x] Critère : MoE spillé quasi total → converge vers le roofline DDR des paramètres actifs (`test_cpu_offload_fully_spilled_moe_hits_ddr_active_roofline`, >8× vs densité équivalente). Ancres Mixtral/Qwen3 spillées complètes non disponibles publiquement avec chiffres fiables → la boucle de calibration communautaire affinera (V0-incertitude).
 
 #### V0-C3 — MLA DeepSeek + purge catalogue — **OUVERT**
 - [ ] **MLA absent** (zéro match `kv_lora_rank` sur tout src/ à HEAD). Formule correcte :
@@ -174,6 +175,11 @@ Légère divergence avec le rapport initial : **le HEAD actuel contient déjà d
 - Ancienne valeur ×0.5 sur ce scénario : ≈7.4 t/s (>2× optimiste) ; nouvelle : 3.3 t/s.
 - 5 tests nouveaux (`test_cpu_offload_*`, `test_spill_fraction_*`) — core : **570 verts** (baseline 565), workspace : **669 verts**, clippy : toujours **39 warnings amont** (aucun ajouté), fmt OK.
 - **NEXT** : V0-C2 (chemin MoE spillé — vérifier ce que #924 laisse passer).
+
+### 2026-08-23 — Session 1 — ✅ V0-C2 TERMINÉ (clos par V0-C1 + #924)
+- Verdict : la fuite « formule dense » du rapport (fit.rs:1410 v1.1.10) n'existe plus — le régime CpuOffload unifié de V0-C1 lit les octets actifs selon le split réel. Mode `MoeOffload` déjà physique et calibré amont. Aucun site `for_run_mode` résiduel illégitime (vérifié par grep exhaustif).
+- Test frontière ajouté : MoE quasi totalement spillé → roofline DDR actifs (`test_cpu_offload_fully_spilled_moe_hits_ddr_active_roofline`). Core : **571 verts**.
+- **NEXT** : V0-C3 (MLA DeepSeek + purge catalogue).
 
 ## 7. Pièges connus & références validées sur HEAD 3f44fd3
 
