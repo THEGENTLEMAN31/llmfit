@@ -5235,6 +5235,8 @@ mod tests {
             num_key_value_heads: None,
             num_hidden_layers: None,
             head_dim: None,
+            kv_lora_rank: None,
+            qk_rope_head_dim: None,
             attention_layout: None,
             license: None,
             hidden_size: None,

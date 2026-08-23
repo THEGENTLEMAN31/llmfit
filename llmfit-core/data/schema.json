@@ -211,6 +211,12 @@
         "head_dim": {
           "$ref": "#/$defs/positiveIntegerOrNull"
         },
+        "kv_lora_rank": {
+          "$ref": "#/$defs/positiveIntegerOrNull"
+        },
+        "qk_rope_head_dim": {
+          "$ref": "#/$defs/positiveIntegerOrNull"
+        },
         "hidden_size": {
           "$ref": "#/$defs/positiveIntegerOrNull"
         },

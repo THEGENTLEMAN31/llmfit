@@ -536,6 +536,16 @@ pub struct LlmModel {
     /// a name based heuristic otherwise.
     #[serde(default)]
     pub head_dim: Option<u32>,
+    /// Multi-head Latent Attention (DeepSeek-V2/V3/R1 family): dimension of
+    /// the compressed KV latent shared by K and V. When present, the precise
+    /// KV cache formula switches from the GQA layout
+    /// (`2 * kv_heads * head_dim` per token) to `kv_lora_rank + rope_dim`
+    /// elements per token per layer — roughly an order of magnitude smaller.
+    #[serde(default)]
+    pub kv_lora_rank: Option<u32>,
+    /// Decoupled RoPE key dimension for MLA architectures (DeepSeek family).
+    #[serde(default)]
+    pub qk_rope_head_dim: Option<u32>,
     /// Attention layer composition for hybrid models (full attention + linear /
     /// Mamba style layers). When None, all layers are assumed to be full
     /// attention. Used by KV cache compression schemes (e.g. TurboQuant) that
@@ -906,6 +916,18 @@ impl LlmModel {
         let params = self.params_b();
         let layout = self.effective_attention_layout();
 
+        // MLA path (DeepSeek-V2/V3/R1 family): K and V share a single
+        // compressed latent of dimension `kv_lora_rank`, plus a decoupled
+        // RoPE key of dimension `qk_rope_head_dim`. Per token per layer that
+        // is `kv_lora_rank + rope_dim` elements — NOT the GQA layout
+        // `2 * n_kv_heads * head_dim`, which overestimates these models by
+        // roughly 25x.
+        if let (Some(n_layers), Some(lora)) = (self.num_hidden_layers, self.kv_lora_rank) {
+            let elems = lora as f64 + self.qk_rope_head_dim.unwrap_or(0) as f64;
+            let total_bytes = n_layers as f64 * elems * ctx as f64 * kv.bytes_per_element();
+            return total_bytes / 1_073_741_824.0;
+        }
+
         // Precise path: requires layer count, KV head count, head dim.
         if let (Some(n_layers), Some(head_dim)) = (self.num_hidden_layers, self.head_dim) {
             let n_kv_heads = self
@@ -992,6 +1014,13 @@ impl LlmModel {
     pub fn effective_attention_layout(&self) -> Option<AttentionLayout> {
         self.attention_layout
             .or_else(|| infer_attention_layout_from_name(&self.name))
+    }
+
+    /// True when this model uses Multi-head Latent Attention (DeepSeek
+    /// family). MLA stores one compressed latent per token per layer instead
+    /// of separate K and V per KV head.
+    pub fn is_mla(&self) -> bool {
+        self.kv_lora_rank.is_some()
     }
 
     /// For MoE models, compute estimated VRAM for active experts only.
@@ -1274,6 +1303,8 @@ fn entry_to_model(e: HfModelEntry) -> LlmModel {
         num_key_value_heads: e.num_key_value_heads,
         num_hidden_layers: e.num_hidden_layers,
         head_dim: e.head_dim,
+        kv_lora_rank: None,
+        qk_rope_head_dim: None,
         attention_layout: None,
         hidden_size: e.hidden_size,
         moe_intermediate_size: e.moe_intermediate_size,
@@ -1421,6 +1452,8 @@ impl OnnxModelEntry {
             num_key_value_heads: None,
             num_hidden_layers: None,
             head_dim: None,
+            kv_lora_rank: None,
+            qk_rope_head_dim: None,
             attention_layout: None,
             hidden_size: None,
             moe_intermediate_size: None,
@@ -1936,6 +1969,8 @@ mod tests {
             num_key_value_heads: None,
             num_hidden_layers: None,
             head_dim: None,
+            kv_lora_rank: None,
+            qk_rope_head_dim: None,
             attention_layout: None,
             hidden_size: None,
             moe_intermediate_size: None,
@@ -2019,6 +2054,8 @@ mod tests {
             num_key_value_heads: None,
             num_hidden_layers: None,
             head_dim: None,
+            kv_lora_rank: None,
+            qk_rope_head_dim: None,
             attention_layout: None,
             hidden_size: None,
             moe_intermediate_size: None,
@@ -2056,6 +2093,8 @@ mod tests {
             num_key_value_heads: None,
             num_hidden_layers: None,
             head_dim: None,
+            kv_lora_rank: None,
+            qk_rope_head_dim: None,
             attention_layout: None,
             hidden_size: None,
             moe_intermediate_size: None,
@@ -2093,6 +2132,8 @@ mod tests {
             num_key_value_heads: None,
             num_hidden_layers: None,
             head_dim: None,
+            kv_lora_rank: None,
+            qk_rope_head_dim: None,
             attention_layout: None,
             hidden_size: None,
             moe_intermediate_size: None,
@@ -2130,6 +2171,8 @@ mod tests {
             num_key_value_heads: None,
             num_hidden_layers: None,
             head_dim: None,
+            kv_lora_rank: None,
+            qk_rope_head_dim: None,
             attention_layout: None,
             hidden_size: None,
             moe_intermediate_size: None,
@@ -2175,6 +2218,8 @@ mod tests {
             num_key_value_heads: None,
             num_hidden_layers: None,
             head_dim: None,
+            kv_lora_rank: None,
+            qk_rope_head_dim: None,
             attention_layout: None,
             hidden_size: None,
             moe_intermediate_size: None,
@@ -2226,6 +2271,8 @@ mod tests {
             num_key_value_heads: None,
             num_hidden_layers: None,
             head_dim: None,
+            kv_lora_rank: None,
+            qk_rope_head_dim: None,
             attention_layout: None,
             hidden_size: None,
             moe_intermediate_size: None,
@@ -2261,6 +2308,8 @@ mod tests {
             num_key_value_heads: None,
             num_hidden_layers: None,
             head_dim: None,
+            kv_lora_rank: None,
+            qk_rope_head_dim: None,
             attention_layout: None,
             hidden_size: None,
             moe_intermediate_size: None,
@@ -2304,6 +2353,8 @@ mod tests {
             num_key_value_heads: None,
             num_hidden_layers: None,
             head_dim: None,
+            kv_lora_rank: None,
+            qk_rope_head_dim: None,
             attention_layout: None,
             hidden_size: None,
             moe_intermediate_size: None,
@@ -2339,6 +2390,8 @@ mod tests {
             num_key_value_heads: None,
             num_hidden_layers: None,
             head_dim: None,
+            kv_lora_rank: None,
+            qk_rope_head_dim: None,
             attention_layout: None,
             hidden_size: None,
             moe_intermediate_size: None,
@@ -2384,6 +2437,8 @@ mod tests {
             num_key_value_heads: None,
             num_hidden_layers: None,
             head_dim: None,
+            kv_lora_rank: None,
+            qk_rope_head_dim: None,
             attention_layout: None,
             hidden_size: None,
             moe_intermediate_size: None,
@@ -2421,6 +2476,8 @@ mod tests {
             num_key_value_heads: None,
             num_hidden_layers: None,
             head_dim: None,
+            kv_lora_rank: None,
+            qk_rope_head_dim: None,
             attention_layout: None,
             hidden_size: None,
             moe_intermediate_size: None,
@@ -2458,6 +2515,8 @@ mod tests {
             num_key_value_heads: None,
             num_hidden_layers: None,
             head_dim: None,
+            kv_lora_rank: None,
+            qk_rope_head_dim: None,
             attention_layout: None,
             hidden_size: None,
             moe_intermediate_size: None,
@@ -2696,6 +2755,8 @@ mod tests {
             num_key_value_heads: None,
             num_hidden_layers: None,
             head_dim: None,
+            kv_lora_rank: None,
+            qk_rope_head_dim: None,
             attention_layout: None,
             hidden_size: None,
             moe_intermediate_size: None,
@@ -2736,6 +2797,8 @@ mod tests {
             num_key_value_heads: None,
             num_hidden_layers: None,
             head_dim: None,
+            kv_lora_rank: None,
+            qk_rope_head_dim: None,
             attention_layout: None,
             hidden_size: None,
             moe_intermediate_size: None,
@@ -2775,6 +2838,8 @@ mod tests {
             num_key_value_heads: None,
             num_hidden_layers: None,
             head_dim: None,
+            kv_lora_rank: None,
+            qk_rope_head_dim: None,
             attention_layout: None,
             hidden_size: None,
             moe_intermediate_size: None,
@@ -2813,6 +2878,8 @@ mod tests {
             num_key_value_heads: None,
             num_hidden_layers: None,
             head_dim: None,
+            kv_lora_rank: None,
+            qk_rope_head_dim: None,
             attention_layout: None,
             hidden_size: None,
             moe_intermediate_size: None,
@@ -2911,6 +2978,8 @@ mod tests {
             num_key_value_heads: None,
             num_hidden_layers: None,
             head_dim: None,
+            kv_lora_rank: None,
+            qk_rope_head_dim: None,
             attention_layout: None,
             hidden_size: None,
             moe_intermediate_size: None,
@@ -3029,6 +3098,8 @@ mod tests {
             num_key_value_heads: kv_heads,
             num_hidden_layers: None,
             head_dim: None,
+            kv_lora_rank: None,
+            qk_rope_head_dim: None,
             attention_layout: None,
             hidden_size: None,
             moe_intermediate_size: None,
@@ -3152,6 +3223,8 @@ mod tests {
             num_key_value_heads: Some(8),
             num_hidden_layers: Some(32),
             head_dim: Some(128),
+            kv_lora_rank: None,
+            qk_rope_head_dim: None,
             attention_layout: None,
             hidden_size: None,
             moe_intermediate_size: None,
@@ -3181,6 +3254,75 @@ mod tests {
         let model = kv_test_model("Llama-3.1-8B");
         let kv = model.kv_cache_gb(8192, KvQuant::Fp16);
         assert!((kv - 1.0).abs() < 0.05, "expected ~1.0 GB, got {:.4}", kv);
+    }
+
+    #[test]
+    fn test_mla_kv_cache_deepseek_r1_hand_calc() {
+        // Fork audit V0-C3 acceptance: DeepSeek-R1 (61 layers, MLA with
+        // kv_lora_rank=512 + qk_rope_head_dim=64) at 32k context, fp16.
+        // bytes = 61 * (512+64) * 32768 * 2 = 2_302_672_896 B ≈ 2.145 GiB.
+        // The former GQA-shaped catalog values (128 heads * 56 dim) produced
+        // ~53 GiB — a ~25x overestimate.
+        let mut m = kv_test_model("deepseek-ai/DeepSeek-R1");
+        m.num_hidden_layers = Some(61);
+        m.num_key_value_heads = None;
+        m.head_dim = None;
+        m.kv_lora_rank = Some(512);
+        m.qk_rope_head_dim = Some(64);
+        let expected = 61.0 * 576.0 * 32768.0 * 2.0 / 1_073_741_824.0;
+        let kv = m.kv_cache_gb(32768, KvQuant::Fp16);
+        assert!(
+            (kv - expected).abs() / expected < 0.001,
+            "MLA KV {kv:.4} vs hand calc {expected:.4}"
+        );
+        assert!(
+            (2.0..=2.3).contains(&kv),
+            "DeepSeek-R1 fp16 KV @32k must be ~2.15 GiB, got {kv:.3}"
+        );
+    }
+
+    #[test]
+    fn test_mla_scales_with_kv_quant_and_rope_optional() {
+        let mut m = kv_test_model("mla");
+        m.num_hidden_layers = Some(10);
+        m.kv_lora_rank = Some(512);
+        m.qk_rope_head_dim = Some(64);
+        let fp16 = m.kv_cache_gb(4096, KvQuant::Fp16);
+        let q8 = m.kv_cache_gb(4096, KvQuant::Q8_0);
+        assert!((q8 / fp16 - 0.5).abs() < 0.01);
+        // Missing rope field degrades gracefully to latent-only size.
+        m.qk_rope_head_dim = None;
+        let no_rope = m.kv_cache_gb(4096, KvQuant::Fp16);
+        assert!((no_rope / fp16 - 512.0 / 576.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_catalog_deepseek_v3_entries_use_mla_metadata() {
+        // Purged catalog: every deepseek_v3-family entry with the canonical
+        // 61-layer architecture must carry the real MLA fields and no bogus
+        // GQA-shaped head metadata.
+        let raw = include_str!("../data/hf_models.json");
+        let models: Vec<LlmModel> =
+            serde_json::from_str(raw).expect("embedded catalog must deserialize against LlmModel");
+        let mut checked = 0;
+        for m in &models {
+            let arch = m.architecture.as_deref().unwrap_or("");
+            if arch.starts_with("deepseek_v3") && m.num_hidden_layers == Some(61) {
+                checked += 1;
+                assert_eq!(m.kv_lora_rank, Some(512), "{}", m.name);
+                assert_eq!(m.qk_rope_head_dim, Some(64), "{}", m.name);
+                assert!(m.head_dim.is_none(), "{} keeps bogus head_dim", m.name);
+                assert!(
+                    m.num_key_value_heads.is_none(),
+                    "{} keeps bogus num_key_value_heads",
+                    m.name
+                );
+            }
+        }
+        assert!(
+            checked >= 10,
+            "expected the V3 family to be migrated, got {checked}"
+        );
     }
 
     #[test]

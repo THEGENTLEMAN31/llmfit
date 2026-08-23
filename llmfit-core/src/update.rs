@@ -399,6 +399,11 @@ struct HfConfig {
     num_key_value_heads: Option<u32>,
     #[serde(default)]
     head_dim: Option<u32>,
+    // Multi-head Latent Attention (DeepSeek family)
+    #[serde(default)]
+    kv_lora_rank: Option<u32>,
+    #[serde(default)]
+    qk_rope_head_dim: Option<u32>,
     #[serde(default)]
     hidden_size: Option<u32>,
     // MoE architecture fields for bandwidth decomposition
@@ -610,6 +615,8 @@ fn map_to_llm_model(hf: HfApiModel, token: Option<&str>) -> Option<LlmModel> {
         vocab_size,
         moe_intermediate_size,
         shared_expert_intermediate_size,
+        kv_lora_rank,
+        qk_rope_head_dim,
     ) = if let Some(c) = cfg.as_ref() {
         // Flatten nested text_config if present (Qwen3.5 vision+text models)
         let flat = c.text_config.as_deref().unwrap_or(c);
@@ -631,21 +638,34 @@ fn map_to_llm_model(hf: HfApiModel, token: Option<&str>) -> Option<LlmModel> {
                 let inter = flat.intermediate_size.or(c.intermediate_size)?;
                 Some(n_shared * inter)
             });
+        // MLA models (DeepSeek family): keep the latent-attention fields and
+        // drop the GQA-shaped values — `num_key_value_heads` in their configs
+        // is meaningless for the cache layout, and a derived
+        // `hidden_size / num_attention_heads` head_dim would poison the KV
+        // formula with ~25x overestimates.
+        let mla = flat.kv_lora_rank.or(c.kv_lora_rank);
+        let n_kv_raw = flat
+            .num_key_value_heads
+            .or(c.num_key_value_heads)
+            .or(flat.num_attention_heads)
+            .or(c.num_attention_heads);
+        let hd_raw = resolve_head_dim(flat);
+        let n_kv = if mla.is_some() { None } else { n_kv_raw };
+        let hd = if mla.is_some() { None } else { hd_raw };
         (
             flat.num_hidden_layers.or(c.num_hidden_layers),
             flat.num_attention_heads.or(c.num_attention_heads),
-            flat.num_key_value_heads
-                .or(c.num_key_value_heads)
-                .or(flat.num_attention_heads)
-                .or(c.num_attention_heads),
-            resolve_head_dim(flat),
+            n_kv,
+            hd,
             hidden,
             vocab,
             moe_inter,
             shared_inter,
+            mla,
+            flat.qk_rope_head_dim.or(c.qk_rope_head_dim),
         )
     } else {
-        (None, None, None, None, None, None, None, None)
+        (None, None, None, None, None, None, None, None, None, None)
     };
 
     let architecture = cfg.as_ref().and_then(|c| c.model_type.clone());
@@ -680,6 +700,8 @@ fn map_to_llm_model(hf: HfApiModel, token: Option<&str>) -> Option<LlmModel> {
         num_key_value_heads,
         num_hidden_layers,
         head_dim,
+        kv_lora_rank,
+        qk_rope_head_dim,
         attention_layout: crate::models::infer_attention_layout_from_name(&hf.id),
         license,
         hidden_size,

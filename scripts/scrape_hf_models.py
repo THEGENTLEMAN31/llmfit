@@ -488,6 +488,8 @@ def extract_arch_metadata(config: dict | None) -> dict:
     vocab_size = None
     moe_intermediate_size = None
     shared_expert_intermediate_size = None
+    kv_lora_rank = None
+    qk_rope_head_dim = None
 
     for src in sources:
         if num_hidden_layers is None:
@@ -518,9 +520,19 @@ def extract_arch_metadata(config: dict | None) -> dict:
             if isinstance(v, list):
                 v = v[0] if v else None
             shared_expert_intermediate_size = v
+        if kv_lora_rank is None:
+            kv_lora_rank = src.get("kv_lora_rank")
+        if qk_rope_head_dim is None:
+            qk_rope_head_dim = src.get("qk_rope_head_dim")
 
-    # GQA default: if num_key_value_heads missing, assume MHA
-    if num_key_value_heads is None:
+    # GQA default: if num_key_value_heads missing, assume MHA. MLA models
+    # (DeepSeek family) carry kv_lora_rank instead: their num_key_value_heads
+    # is meaningless for the cache layout and a derived head_dim would be
+    # wrong, so drop both in favour of the latent-attention fields.
+    if kv_lora_rank is not None:
+        num_key_value_heads = None
+        head_dim = None
+    elif num_key_value_heads is None:
         num_key_value_heads = num_attention_heads
 
     return {
@@ -528,6 +540,8 @@ def extract_arch_metadata(config: dict | None) -> dict:
         "num_attention_heads": num_attention_heads,
         "num_key_value_heads": num_key_value_heads,
         "head_dim": head_dim,
+        "kv_lora_rank": kv_lora_rank,
+        "qk_rope_head_dim": qk_rope_head_dim,
         "hidden_size": hidden_size,
         "vocab_size": vocab_size,
         "moe_intermediate_size": moe_intermediate_size,

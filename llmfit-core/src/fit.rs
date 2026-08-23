@@ -1886,6 +1886,8 @@ mod tests {
             num_key_value_heads: None,
             num_hidden_layers: None,
             head_dim: None,
+            kv_lora_rank: None,
+            qk_rope_head_dim: None,
             attention_layout: None,
             license: None,
             hidden_size: None,
@@ -2177,6 +2179,8 @@ mod tests {
             num_key_value_heads: None,
             num_hidden_layers: None,
             head_dim: None,
+            kv_lora_rank: None,
+            qk_rope_head_dim: None,
             attention_layout: None,
             license: None,
             hidden_size: None,
@@ -2222,6 +2226,8 @@ mod tests {
             num_key_value_heads: None,
             num_hidden_layers: None,
             head_dim: None,
+            kv_lora_rank: None,
+            qk_rope_head_dim: None,
             attention_layout: None,
             license: None,
             hidden_size: None,
@@ -3026,9 +3032,8 @@ mod tests {
         let weights_gb = 80.0 * bpp;
         let spill = spill_fraction(weights_gb, 2.0 * HYBRID_VRAM_USABLE_FRACTION);
         let active_gb = 3.3 * bpp;
-        let expected = 1.0 / ((active_gb * (1.0 - spill)) / (bw * config.efficiency)
-            + (active_gb * spill)
-                / 50.0);
+        let expected = 1.0
+            / ((active_gb * (1.0 - spill)) / (bw * config.efficiency) + (active_gb * spill) / 50.0);
         assert!(
             (tps - expected).abs() / expected < 0.05,
             "fully-spilled moe tps {tps:.2} vs hand-computed {expected:.2}"
@@ -3595,6 +3600,8 @@ mod tests {
             num_key_value_heads: None,
             num_hidden_layers: None,
             head_dim: None,
+            kv_lora_rank: None,
+            qk_rope_head_dim: None,
             attention_layout: None,
             license: None,
             hidden_size: None,
@@ -3883,6 +3890,8 @@ mod tests {
             num_key_value_heads: None,
             num_hidden_layers: None,
             head_dim: None,
+            kv_lora_rank: None,
+            qk_rope_head_dim: None,
             attention_layout: None,
             license: None,
             hidden_size: None,
@@ -4168,6 +4177,8 @@ mod tests {
             num_key_value_heads: Some(num_key_value_heads),
             num_hidden_layers: Some(num_hidden_layers),
             head_dim: Some(head_dim),
+            kv_lora_rank: None,
+            qk_rope_head_dim: None,
             attention_layout: None,
             license: None,
             hidden_size: Some(hidden_size),
