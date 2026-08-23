@@ -93,12 +93,11 @@ Légère divergence avec le rapport initial : **le HEAD actuel contient déjà d
 - [x] ~~Si insuffisant~~ — couvert ; voir test frontière ci-dessous.
 - [x] Critère : MoE spillé quasi total → converge vers le roofline DDR des paramètres actifs (`test_cpu_offload_fully_spilled_moe_hits_ddr_active_roofline`, >8× vs densité équivalente). Ancres Mixtral/Qwen3 spillées complètes non disponibles publiquement avec chiffres fiables → la boucle de calibration communautaire affinera (V0-incertitude).
 
-#### V0-C3 — MLA DeepSeek + purge catalogue — **OUVERT**
-- [ ] **MLA absent** (zéro match `kv_lora_rank` sur tout src/ à HEAD). Formule correcte :
-  `KV_MLA = L × ctx × (kv_lora_rank + qk_rope_head_dim) × dtype_bytes` (par token : `(kv_lora_rank + rope)` octets×dtype/couche, PAS `2·H_kv·d_head`).
-- [ ] Détection : champs `config.json` HF `kv_lora_rank` / `qk_rope_head_dim` (modèles deepseek2/deepseek-v3). Ajouter au struct modèle + branchement dans le calcul KV (models.rs calcule aujourd'hui `2·L·H_kv·d_head·ctx·dtype` partout).
-- [ ] **Purger le catalogue** `data/hf_models.json` : entrées DeepSeek avec métadonnées inventées (`H_kv=128, d_head=56`) → KV surestimé ~25×. Script de validation croisée contre config.json HF live (comme `fetch_hf_config` update.rs:428-462), corriger/regénérer les entrées deepseek*.
-- [ ] Critère : test unitaire KV DeepSeek-R1 @32k ctx ≈ valeur documentée (ordre de grandeur ~0,1-0,2 Go fp8, vs ~2,5+ Go avec l'erreur actuelle) ; `cargo test` vert.
+#### V0-C3 — MLA DeepSeek + purge catalogue — **RÉSOLU (commit 44100e8)**
+- [x] **MLA implémenté** : champs `kv_lora_rank`/`qk_rope_head_dim` sur `LlmModel` (serde-default), branche dédiée dans `kv_cache_gb` AVANT le chemin GQA : `L × (lora+rope) × ctx × bpe` (K et V partagent le latent → pas de facteur 2).
+- [x] `fetch_hf_config` lit les vrais champs ; si présents, les valeurs GQA-bogues (`num_key_value_heads` sans signification, `head_dim` dérivé) sont neutralisées au lieu d'être propagées.
+- [x] **Catalogue purgé** : 34 entrées famille `deepseek_v3`/`deepseek_v32` (L=61) migrées vers MLA réel (512/64, head metadata effacées). Scraper patché (mêmes champs + précédence MLA) pour que la régénération préserve la migration. `schema.json` accepte les nouvelles clés. Famille `deepseek_v4` volontairement NON touchée (config non vérifiable — honnêteté).
+- [x] Critère : DeepSeek-R1 fp16 @32k = 61×576×32768×2 ≈ **2,15 GiB** (vs ~53 GiB avant → ~25× corrigé, conforme à l'audit). Tests : hand-calc, scaling quant, dégradation sans rope, purge catalogue embarquée.
 
 #### V0-bpp — Unifier les tables bpp — **OUVERT**
 - [ ] Deux tables divergentes : models.rs:~19-36 (`quant_bpp` défaut 0.58) vs models.rs:~70-85 (défaut 0.50) ; Q4_K_M = 0.58 vs 0.50 selon le chemin. Le scraper Python (scripts/) a sa propre table.
@@ -174,7 +173,12 @@ Légère divergence avec le rapport initial : **le HEAD actuel contient déjà d
 - **Spéc ajustée par la physique** : régime résident = séquentiel additif, validé par discussion llama.cpp **#12126** ; ancrages chiffrés tirés de **PR #3457** (70B Q2_K, 3090 Ti 24 Go, ngl 60 → tg ≈ 4.7-5.0 t/s) et issue **#5272** (70B, spill ~75 % → tg ≈ 0.8-1.0 t/s). Notre prédiction à spill 37 % ≈ 3.3 t/s s'insère de façon monotone entre les deux bornes mesurées → critère <40 % respecté par construction du modèle.
 - Ancienne valeur ×0.5 sur ce scénario : ≈7.4 t/s (>2× optimiste) ; nouvelle : 3.3 t/s.
 - 5 tests nouveaux (`test_cpu_offload_*`, `test_spill_fraction_*`) — core : **570 verts** (baseline 565), workspace : **669 verts**, clippy : toujours **39 warnings amont** (aucun ajouté), fmt OK.
-- **NEXT** : V0-C2 (chemin MoE spillé — vérifier ce que #924 laisse passer).
+- **NEXT** : V0-C3 (MLA DeepSeek + purge catalogue).
+
+### 2026-08-23 — Session 1 — ✅ V0-C3 TERMINÉ (commit 44100e8)
+- MLA complet (modèle, KV formula, fetch HF, catalogue, scraper, schéma). R1 @32k fp16 : 53 GiB → 2,15 GiB. Workspace : **673 verts**, clippy 39 (inchangé), fmt OK.
+- Note : le guide estimait la vraie valeur KV à « 0,1-0,2 Go » — erreur arithmétique du guide ; la bonne ordre de grandeur est ~2 GiB (l'audit « ~25× » reste exact).
+- **NEXT** : V0-bpp (unifier les tables), puis V0-incertitude. Ensuite milestone/tag `v0-honnetete`.
 
 ### 2026-08-23 — Session 1 — ✅ V0-C2 TERMINÉ (clos par V0-C1 + #924)
 - Verdict : la fuite « formule dense » du rapport (fit.rs:1410 v1.1.10) n'existe plus — le régime CpuOffload unifié de V0-C1 lit les octets actifs selon le split réel. Mode `MoeOffload` déjà physique et calibré amont. Aucun site `for_run_mode` résiduel illégitime (vérifié par grep exhaustif).
