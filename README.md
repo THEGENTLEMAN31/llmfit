@@ -139,6 +139,22 @@ llmfit bench                  # measure real tok/s/TTFT against your running pro
 llmfit doctor                 # hardware detection report for bug reports
 ```
 
+### Introspection: plan any GGUF, not just catalog entries
+
+`plan` and `audit` read real GGUF headers — locally or straight from HuggingFace via HTTP range requests (a few MB of metadata, never the weights):
+
+```sh
+llmfit audit ./model-Q4_K_M.gguf                       # exact quant mix, experts, context, per-block types
+llmfit audit Qwen/Qwen3-235B-A22B-GGUF --quant Q4_K_M  # same, remote: repo id resolved to the best file
+llmfit audit https://.../model.gguf                    # same, direct URL
+
+# Plan on introspected data + get a ready-to-run llama.cpp command:
+llmfit --memory 24G --ram 192G plan Qwen/Qwen3-235B-A22B-GGUF --quant Q4_K_M --context 16384
+# → llama-server -hf Qwen/Qwen3-235B-A22B-GGUF:Q4_K_M -c 16384 -fa -ngl 99 --n-cpu-moe N
+```
+
+The suggested `--n-cpu-moe N` comes from the audited expert tensor sizes and your VRAM budget, not from filename heuristics; sharded models are detected and rescaled to the full set. When nothing fits, llmfit says so instead of printing a command that would OOM. Full method: [FORK_GUIDE.md](FORK_GUIDE.md).
+
 Full reference: [CLI & automation](docs/cli.md).
 
 ---

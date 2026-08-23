@@ -128,10 +128,10 @@ Légère divergence avec le rapport initial : **le HEAD actuel contient déjà d
 - [x] Intégration : quand le modèle n'est ni installé ni connu du catalogue → introspecter le dépôt HF (choix du fichier GGUF par variante de quant demandée).
 - [x] Critère : introspection d'un gros MoE (ex. Qwen3-235B-GGUF) sans téléchargement >4 Mo, en <10 s réseau normal. Test d'intégration derrière feature flag réseau (ignorable hors-ligne).
 
-#### V1-c — MLA/SWA réels + commande finale llama.cpp — **ABSENT**
-- [ ] Brancher les données introspectées (V1-a/b + config.json) dans le moteur : MLA (formule C3), SWA fenêtré (`sliding_window` → KV plafonnée à la fenêtre au-delà du prompt > fenêtre), YaRN (scaling du contexte).
-- [ ] Sortie actionnable : ligne complète `llama-server -m … -ngl N --n-cpu-moe E -c CTX -fa [--split-mode …]` (⚠️ vérifier le nom exact du flag experts-CPU contre le llama.cpp courant au moment d'implémenter ; `-ncmoe` du rapport est un raccourci).
-- [ ] Critère : exemple du §1 reproduit par la CLI sur machine fictive figée (fixture hardware) ; doc README fork mise à jour.
+#### V1-c — MLA/SWA réels + commande finale llama.cpp — ✅ **TERMINÉ** (session 3)
+- [x] Brancher les données introspectées (V1-a/b + config.json) dans le moteur : MLA (formule C3), SWA fenêtré (`sliding_window` → KV plafonnée à la fenêtre au-delà du prompt > fenêtre), YaRN (scaling du contexte).
+- [x] Sortie actionnable : ligne complète `llama-server -m … -ngl N --n-cpu-moe E -c CTX -fa [--split-mode …]` (⚠️ vérifier le nom exact du flag experts-CPU contre le llama.cpp courant au moment d'implémenter ; `-ncmoe` du rapport est un raccourci).
+- [x] Critère : exemple du §1 reproduit par la CLI sur machine fictive figée (fixture hardware) ; doc README fork mise à jour.
 
 **Milestone V1 : tag `v1-introspection` + push.**
 
@@ -206,6 +206,17 @@ Légère divergence avec le rapport initial : **le HEAD actuel contient déjà d
 - Tests : 9 unitaires offline (serveur TCP mock ranges/302/cap) + 2 intégration réseau derrière `LLMFIT_NET_TESTS=1` (`#[ignore]`). Workspace : **702 verts**, clippy propre sur le nouveau code, fmt OK.
 - **NEXT** : V1-c (MLA/SWA réels + commande finale llama.cpp).
 
+### 2026-08-23 — Session 3 — ✅ V1-c TERMINÉ
+- **Moteur** (models.rs) : `LlmModel` gagne `sliding_window`, `rope_scaling_type/factor/original_context_length` (serde default, rétro-compatible JSON). `kv_cache_gb` : cap SWA `min(ctx, fenêtre)` par couche — hypothèse « toutes les couches windowed » documentée dans le code (les hybrides type gemma3 gardent des couches globales → réel plus haut). MLA C3 déjà branché en V0-C3 ; le pont GGUF alimente désormais les mêmes champs. YaRN : **aucun flag à générer** — llama.cpp lit `{arch}.rope.scaling.*` depuis les métadonnées GGUF lui-même (vérifié llama-model.cpp:1202) ; les champs sont informationnels (plan/audit).
+- **Pont GGUF→moteur** : `LlmModel::from_gguf_summary(&GgufModelSummary, display_name)` — remplissage honnête champ par champ (ce que le header ne déclare pas reste `None`) ; `qk_rope_head_dim` mappé depuis `rope.dimension_count` UNIQUEMENT si `kv_lora_rank` présent (sinon c'est le dim RoPE complet d'une tête normale).
+- **Commande actionnable** (plan.rs) : `recommended_n_cpu_moe()` dérive N de `--n-cpu-moe N` (sémantique llama.cpp vérifiée arg.cpp:2748 : experts des **N premières couches** sur CPU, PAS un nombre d'experts) via un ledger statique : VRAM − KV − poids denses/actifs − 1,5 Go overhead ≥ experts des couches gardées sur GPU. EPL exact quand les octets de tenseurs introspectés existent, sinon approximation inactive-params/n_layers (biais conservateur documenté). `llamacpp_server_command()` produit `llama-server {−hf repo:quant | −m path} -c CTX -fa [-ngl 99 [--n-cpu-moe N] | -ngl auto | -ngl 0] [-ctv q8_0|q4_0]`. MoE partiel = `-ngl 99 --n-cpu-moe N` (recette moderne, tous blocs résidents) ; offload dense = `-ngl auto` (llama.cpp sait mieux compter que nous sans ledger embeddings/output). Champ `PlanEstimate.llamacpp_command` (JSON + texte). **Gate honnêteté** : fit TooTight ⇒ pas de commande (une ligne qui OOM n'est pas un conseil).
+- **Bug sharded trouvé et corrigé** : un shard porte les métadonnées du modèle ENTIER mais seulement 1/M des tenseurs → mélanger octets du shard et block_count global sous-estimait tout d'un facteur M (Qwen3-235B : « min VRAM 31 Go » au lieu de ~142 Go). Fix : `GgufModelSummary::scaled_to_full_model(M)` appliqué côté CLI dès que `-NNNNN-of-MMMMM` est détecté.
+- **Bug evaluate_current corrigé** : candidats comparés modèle entier vs une ressource → tout gros MoE était TooTight partout, l'égalité retombait sur Gpu (`-ngl all` garanti OOM). Ajout d'un candidat MoE évalué sur son vrai partage (VRAM = dense+actifs+KV, RAM = inactifs), pire des deux niveaux retenu ; `run_mode` passe par `speed_run_mode` (MoeOffload pour les MoE).
+- **Découverte §7** : l'exemple illustratif du §1 (24 Go VRAM + 96 Go DDR5 pour Qwen3-235B Q4_K_M ≈ 135 Go de poids) est **physiquement impossible** — 24+96=120 < 135. Aucun split n'y change rien (la mémoire est conservée). Fixture du critère ajustée : RTX 3090 24 Go + **192 Go** DDR5 → `-ngl 99 --n-cpu-moe 92` (cohérent avec le ledger : ~4,5 Go d'experts GPU après KV+dense+overhead).
+- Critère reproduit en live (réseau) : `plan Qwen/Qwen3-235B-A22B-GGUF --quant Q4_K_M --context 16384` sur la fixture → commande ci-dessus, KV 16k fp16 = 2,94 Go (94 couches, head_dim 128, 4 KV heads — données réelles du header). Test CLI offline équivalent : fixture GGUF MoE synthétique + `--memory 24G --ram 96G --cpu-cores 16` asserte `llama-server/-c/-fa/--n-cpu-moe` en texte ET `llamacpp_command` en JSON.
+- Tests : +8 unitaires (SWA cap, pont GGUF, scaling shards, N MoE, formes de commande) + 1 smoke CLI. Workspace : **711 verts**, clippy propre sur le nouveau code, fmt OK.
+- **NEXT** : Milestone V1 → tag `v1-introspection` + push ; puis V2-a (PCIe).
+
 ## 7. Pièges connus & références validées sur HEAD 3f44fd3
 
 | Fait | Référence | Attention |
@@ -216,6 +227,9 @@ Légère divergence avec le rapport initial : **le HEAD actuel contient déjà d
 | Quant détectée par nom de fichier | providers.rs:1056-1083 | deviendra fallback après V1-a |
 | Header GGUF distant > 4 Mio (arrays tokenizer insécables) | remote.rs (mesuré 7,3–7,5 Mio : Llama-3.2-1B, Qwen3-235B) | cap réel 32 Mio = garde-fou anti-poids, pas budget strict |
 | Coût fixe ~0,9 s/requête sur CDN HF | mesure curl V1-b (us.aws.cdn.hf.co) | gros chunks + redirect résolu 1 fois, sinon lent |
+| `--n-cpu-moe N` compte des COUCHES, pas des experts | llama.cpp arg.cpp:2748 (« MoE weights of the first N layers ») | le split du moteur est en octets → conversion couches = ceil/floor sur l'EPL |
+| Shard GGUF = métadonnées globales + 1/M des tenseurs | gguf.rs `scaled_to_full_model` (V1-c) | ne jamais mélanger block_count global et octets d'un shard sans ×M |
+| YaRN/rope-scaling : zéro flag à générer | llama-model.cpp:1202 lit `{arch}.rope.scaling.*` du GGUF | émettre --rope-scaling/--yarn-orig-ctx serait redondant (extrapolation manuelle seulement) |
 | Calibrage rejette batch>1 | benchmarks.rs:452-464 | lever en V2-d |
 | Percentiles communautaires non exposés | fit.rs ~2714 (p10/median/p90) | base de V0-incertitude |
 | Tolerance tests perf existants | fit.rs ~3702 (±30 % Q4_K_M, ±50 % sinon) | garder cohérents |
