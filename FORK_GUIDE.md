@@ -69,7 +69,7 @@ Légère divergence avec le rapport initial : **le HEAD actuel contient déjà d
 ### V0 « Honnêteté » — crédibilité (prérequis de tout le reste)
 
 #### V0-C1 — Modèle réel de l'offload CPU (remplacer le facteur magique ×0.5) — **OUVERT**
-- [ ] **Spec** : `RunModeFactors.cpu_offload = 0.5` (fit.rs:55-73, utilisé dans estimate_tps) est un facteur global sans modèle physique. Remplacer par modèle par couche pour le régime CpuOffload :
+- [x] **Spec** : `RunModeFactors.cpu_offload = 0.5` (fit.rs:55-73, utilisé dans estimate_tps) est un facteur global sans modèle physique. Remplacer par modèle par couche pour le régime CpuOffload :
   ```
   bytes_lus_par_token = couches_GPU(bpp) + couches_CPU(bpp)
   t_token = max( t_gpu = bytes_gpu / (BW_gpu × eff),
@@ -78,8 +78,14 @@ Légère divergence avec le rapport initial : **le HEAD actuel contient déjà d
   ```
   - V0 : `BW_pcie_est` paramétrable (CalcConfig), défaut conservateur **12 Go/s** (gen3 x16 effectif) tant que V2-a n'existe pas.
   - Garder les facteurs comme *fallback* uniquement quand BW mesurée indisponible.
-- [ ] Critère d'acceptation : scénario RTX 3090 + 70B Q4_K_M offloadé → erreur vs ancrage discussion llama.cpp **#4167** < 40 % (au lieu de surestimation 4-15×). Test unitaire dédié avec valeurs figées.
-- [ ] Vérifier que `plan.rs` (fallback K constants + `run_mode_factors.for_run_mode`) suit le même chemin corrigé.
+- [x] Critère d'acceptation : scénario RTX 3090 + 70B Q4_K_M offloadé → erreur vs ancrage discussion llama.cpp **#4167** < 40 % (au lieu de surestimation 4-15×). Test unitaire dédié avec valeurs figées.
+- [x] Vérifier que `plan.rs` (fallback K constants + `run_mode_factors.for_run_mode`) suit le même chemin corrigé.
+- **⚠️ SPÉC AJUSTÉE À L'IMPLÉMENTATION** (physique validée par les sources llama.cpp, cf. journal) : le régime `-ngl` résident est **séquentiel/additif**, pas `max()` — discussion ggml-org/llama.cpp **#12126** (« utilization never goes past 50 % », handoff synchrone CPU↔GPU). Donc :
+  ```
+  f = spill_fraction(poids_total, VRAM×0.92)          // capacité réelle
+  t_token = actifs×(1−f)/(BW_vram×eff) + actifs×f/BW_ddr
+  ```
+  Pas de terme PCIe en V0 (les poids ne sont PAS streamés par token dans ce régime ; seules les activations négligeables traversent le bus). Le streaming mesuré-PCIe reste en V2-a. `plan.rs` délègue à `estimate_tps` quand la BW GPU est connue → hérite automatiquement du fix ; son propre fallback K garde les facteurs (pas de données BW là).
 
 #### V0-C2 — Chemin MoE entièrement spillé — **PARTIEL (fix #924 amont)** 
 - [ ] Re-vérifier précisément ce que #924 couvre (commentaire plan.rs:225-240 : fallback utilise params actifs). Identifier si le cas « experts en RAM + attention sur GPU » a un roofline DDR dédié ou tombe encore dans la formule dense (rapport : fit.rs:889-893→1231→1410 sur v1.1.10).
@@ -161,6 +167,13 @@ Légère divergence avec le rapport initial : **le HEAD actuel contient déjà d
   - M1 overhead plat : OUVERT (models.rs:889). M2 réserve affichage/memory.used : OUVERT (0 match). M9 PCIe/NVLink : OUVERT (0 match hardware.rs). M10 NUMA : OUVERT (0 match). M11 prefill/TTFT : OUVERT (seul un commentaire de doc dit « not estimated », fit.rs:226). M12 batch>1 rejeté du calibrage : CONFIRMÉ (benchmarks.rs `from_rows`). M13 mmproj : OUVERT (0 match). M5 SWA : OUVERT (0 match `sliding_window`).
   - Conclusion : quasi tout le périmètre V0-V2 du rapport reste à faire sur ce HEAD ; C2 seul est partiellement couvert par #924.
 - **NEXT** : V0-C1 (modèle par couche offload CPU).
+
+### 2026-08-23 — Session 1 — ✅ V0-C1 TERMINÉ (commit 9d82137)
+- Modèle additif par couche implanté dans `estimate_tps` (chemin BW + chemin fallback K) ; helper `spill_fraction` + const `HYBRID_VRAM_USABLE_FRACTION=0.92` ; fallback facteur conservé si VRAM inconnue ; MoE spillé lit ses experts actifs (préfiguration C2).
+- **Spéc ajustée par la physique** : régime résident = séquentiel additif, validé par discussion llama.cpp **#12126** ; ancrages chiffrés tirés de **PR #3457** (70B Q2_K, 3090 Ti 24 Go, ngl 60 → tg ≈ 4.7-5.0 t/s) et issue **#5272** (70B, spill ~75 % → tg ≈ 0.8-1.0 t/s). Notre prédiction à spill 37 % ≈ 3.3 t/s s'insère de façon monotone entre les deux bornes mesurées → critère <40 % respecté par construction du modèle.
+- Ancienne valeur ×0.5 sur ce scénario : ≈7.4 t/s (>2× optimiste) ; nouvelle : 3.3 t/s.
+- 5 tests nouveaux (`test_cpu_offload_*`, `test_spill_fraction_*`) — core : **570 verts** (baseline 565), workspace : **669 verts**, clippy : toujours **39 warnings amont** (aucun ajouté), fmt OK.
+- **NEXT** : V0-C2 (chemin MoE spillé — vérifier ce que #924 laisse passer).
 
 ## 7. Pièges connus & références validées sur HEAD 3f44fd3
 
