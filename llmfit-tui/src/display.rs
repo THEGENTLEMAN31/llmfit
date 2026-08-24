@@ -632,6 +632,12 @@ fn display_estimate_basis(fit: &ModelFit) {
                     ddr
                 );
             }
+            if let Some(pcie) = basis.pcie_bandwidth_gbps {
+                println!(
+                    "  Hybrid run: residual-stream handoff sized with ~{:.1} GB/s PCIe link",
+                    pcie
+                );
+            }
         }
         "cpu_constant" => {
             println!("  Method: CPU heuristic constant (no GPU acceleration assumed)");

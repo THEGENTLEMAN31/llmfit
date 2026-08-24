@@ -33,6 +33,13 @@ pub struct CalcConfig {
     /// once per process, otherwise a conservative 50 GB/s.
     #[serde(default)]
     pub ddr_bandwidth_gbps: Option<f64>,
+    /// Host↔GPU interconnect (PCIe) bandwidth in GB/s, used for the activation
+    /// handoff terms in hybrid CPU+GPU estimates. None = auto:
+    /// LLMFIT_PCIE_BANDWIDTH env var if set, otherwise the link capability
+    /// reported by sysfs / nvidia-smi (read once per process), otherwise a
+    /// conservative 12 GB/s (Gen3 x16 effective).
+    #[serde(default)]
+    pub pcie_bandwidth_gbps: Option<f64>,
 }
 
 impl Default for CalcConfig {
@@ -43,6 +50,7 @@ impl Default for CalcConfig {
             run_mode_factors: RunModeFactors::default(),
             scoring_weights: ScoringWeights::default(),
             ddr_bandwidth_gbps: None,
+            pcie_bandwidth_gbps: None,
         }
     }
 }
@@ -220,6 +228,11 @@ pub struct EstimateBasis {
     /// System RAM bandwidth assumed for MoE expert streaming (GB/s);
     /// only set for MoE-offload runs.
     pub ddr_bandwidth_gbps: Option<f64>,
+    /// Host↔GPU interconnect (PCIe) bandwidth assumed for activation handoff
+    /// (GB/s); only set for run modes that split work across the bus
+    /// (CpuOffload, MoeOffload).
+    #[serde(default)]
+    pub pcie_bandwidth_gbps: Option<f64>,
     /// Efficiency factor applied to raw bandwidth (default 0.55).
     pub efficiency: f64,
     /// The estimate models single-request *generation* throughput at this
@@ -646,6 +659,8 @@ impl ModelFit {
                 gpu_bandwidth_gbps: (run_mode != RunMode::CpuOnly).then_some(gpu_bw).flatten(),
                 ddr_bandwidth_gbps: (run_mode == RunMode::MoeOffload)
                     .then(|| ddr_bandwidth_gbps(&config)),
+                pcie_bandwidth_gbps: matches!(run_mode, RunMode::MoeOffload | RunMode::CpuOffload)
+                    .then(|| pcie_bandwidth_gbps(&config)),
                 efficiency: config.efficiency,
                 assumed_context: estimation_ctx,
                 local_calibration: None,
@@ -1261,6 +1276,54 @@ fn ddr_bandwidth_gbps(config: &CalcConfig) -> f64 {
     crate::hardware::measured_ram_bandwidth_gbps().unwrap_or(50.0)
 }
 
+/// Conservative default host↔GPU bandwidth when nothing measurable exists:
+/// PCIe Gen3 x16 effective throughput after protocol overheads.
+const DEFAULT_PCIE_BANDWIDTH_GBPS: f64 = 12.0;
+
+/// Host↔GPU interconnect (PCIe) bandwidth (GB/s) used for activation handoff.
+///
+/// Resolution order:
+///  1. `CalcConfig::pcie_bandwidth_gbps` (TUI Advanced Config)
+///  2. `LLMFIT_PCIE_BANDWIDTH` env var (e.g. `export LLMFIT_PCIE_BANDWIDTH=25`)
+///  3. Negotiated link measured once per process
+///     (`hardware::measured_pcie_bandwidth_gbps`, sysfs / nvidia-smi)
+///  4. Conservative 12 GB/s fallback (Gen3 x16 effective)
+fn pcie_bandwidth_gbps(config: &CalcConfig) -> f64 {
+    if let Some(bw) = config.pcie_bandwidth_gbps.filter(|b| *b > 0.0) {
+        return bw;
+    }
+    if let Some(bw) = std::env::var("LLMFIT_PCIE_BANDWIDTH")
+        .ok()
+        .and_then(|v| v.parse::<f64>().ok())
+        .filter(|b| *b > 0.0)
+    {
+        return bw;
+    }
+    crate::hardware::measured_pcie_bandwidth_gbps().unwrap_or(DEFAULT_PCIE_BANDWIDTH_GBPS)
+}
+
+/// Seconds per token spent moving the residual stream across the host↔GPU
+/// bus. Decode transfers one fp32 hidden state per crossing:
+///  - CpuOffload (-ngl split): contiguous layer pools → 2 crossings per token
+///    (enter and exit the CPU pool).
+///  - MoeOffload (--n-cpu-moe): every layer's FFN runs off-GPU → 2 crossings
+///    per layer.
+///
+/// The magnitude is second-order next to the GB-scale weight reads, but it is
+/// now grounded in a measured link instead of assumed zero. Returns 0.0 when
+/// the architecture metadata needed to size the transfer is missing — never
+/// guessed from parameter counts.
+fn pcie_bus_handoff_seconds(model: &LlmModel, run_mode: RunMode, pcie_bw: f64) -> f64 {
+    let Some(hidden) = model.hidden_size else {
+        return 0.0;
+    };
+    let crossings = match run_mode {
+        RunMode::MoeOffload => 2.0 * f64::from(model.num_hidden_layers.unwrap_or(0)),
+        _ => 2.0,
+    };
+    crossings * f64::from(hidden) * 4.0 / (pcie_bw.max(1.0) * 1e9)
+}
+
 /// Estimate decode throughput in tok/s.
 ///
 /// This is the single source of truth for speed estimation. `plan.rs` delegates
@@ -1350,17 +1413,22 @@ pub(crate) fn estimate_tps(
             // dual-channel).
             if run_mode == RunMode::MoeOffload {
                 let ddr_bw = ddr_bandwidth_gbps(config);
+                let pcie_bw = pcie_bandwidth_gbps(config);
 
                 let expert_read_time = active_gb / ddr_bw; // CPU reads from DDR
                 let gpu_compute_time = active_gb / (bw * efficiency);
-                let total_time = expert_read_time + gpu_compute_time;
+                let handoff_time = pcie_bus_handoff_seconds(model, run_mode, pcie_bw);
+                let total_time = expert_read_time + gpu_compute_time + handoff_time;
 
                 debug_log!(
-                    "MoE Offload: {} ddr_bw={:.0}GB/s expert_read={:.3}s gpu_compute={:.3}s tps={:.1}",
+                    "MoE Offload: {} ddr_bw={:.0}GB/s pcie_bw={:.1}GB/s \
+                     expert_read={:.3}s gpu_compute={:.3}s handoff={:.4}s tps={:.1}",
                     model.name,
                     ddr_bw,
+                    pcie_bw,
                     expert_read_time,
                     gpu_compute_time,
+                    handoff_time,
                     1.0 / total_time
                 );
                 let mode_factor = config.run_mode_factors.for_run_mode(run_mode);
@@ -1502,6 +1570,7 @@ pub(crate) fn estimate_tps(
         // runs the rest on CPU. Layers execute sequentially within a token, so
         // per-token time is ADDITIVE across the two pools:
         //   t = active_resident_gb / (BW_vram * eff) + active_spilled_gb / DDR_BW
+        //       + residual-stream handoff across the PCIe link
         //
         // The split fraction follows real capacity: total weights that do not
         // fit usable VRAM live in RAM. Per-token READS still follow active
@@ -1510,10 +1579,13 @@ pub(crate) fn estimate_tps(
         // full-VRAM-bandwidth estimate, which overestimated hybrid decode by
         // roughly an order of magnitude on mid-range VRAM.
         //
-        // PCIe weight streaming is intentionally NOT modeled here: resident-
-        // split runtimes do not stream weights per token; only negligible
-        // activation tensors cross the bus. A measured-PCIe streaming model is
-        // a later milestone.
+        // PCIe weight streaming is still NOT modeled here: resident-split
+        // runtimes do not stream weights per token. What crosses the bus each
+        // token is the residual stream at the pool boundary — second-order,
+        // but sized from the MEASURED link (V2-a) instead of being ignored.
+        // Runtimes that do stream spilled weights per token (e.g. vLLM's CPU
+        // offloading) would need the much larger streamed-bytes term; that is
+        // a documented limitation, not an assumption made silently.
         if run_mode == RunMode::CpuOffload {
             return match system
                 .total_gpu_vram_gb
@@ -1525,20 +1597,24 @@ pub(crate) fn estimate_tps(
                     let total_weights_gb = model.params_b() * bytes_per_param;
                     let spill = spill_fraction(total_weights_gb, vram);
                     let ddr_bw = ddr_bandwidth_gbps(config);
+                    let pcie_bw = pcie_bandwidth_gbps(config);
                     let gpu_time = (active_gb * (1.0 - spill)) / (bw * efficiency);
                     let cpu_time = (active_gb * spill) / ddr_bw;
+                    let handoff_time = pcie_bus_handoff_seconds(model, run_mode, pcie_bw);
                     debug_log!(
                         "Hybrid offload: {} weights={:.1}GB vram={:.1}GB spill={:.2} \
-                         gpu_t={:.3}s cpu_t={:.3}s tps={:.2}",
+                         gpu_t={:.3}s cpu_t={:.3}s handoff={:.4}s pcie_bw={:.1}GB/s tps={:.2}",
                         model.name,
                         total_weights_gb,
                         vram,
                         spill,
                         gpu_time,
                         cpu_time,
-                        1.0 / (gpu_time + cpu_time)
+                        handoff_time,
+                        pcie_bw,
+                        1.0 / (gpu_time + cpu_time + handoff_time)
                     );
-                    (1.0 / (gpu_time + cpu_time)).max(0.1)
+                    (1.0 / (gpu_time + cpu_time + handoff_time)).max(0.1)
                 }
                 None => {
                     // VRAM size unknown: the physical split cannot be resolved.
@@ -1618,9 +1694,11 @@ pub(crate) fn estimate_tps(
             let spill = spill_fraction(total_weights_gb, vram);
             let estimated_gpu_bw = k * bytes_per_param / fallback_efficiency;
             let ddr_bw = ddr_bandwidth_gbps(config);
+            let pcie_bw = pcie_bandwidth_gbps(config);
             let gpu_time = (read_gb * (1.0 - spill)) / (estimated_gpu_bw * fallback_efficiency);
             let cpu_time = (read_gb * spill) / ddr_bw;
-            base = (1.0 / (gpu_time + cpu_time)).max(0.1);
+            let handoff_time = pcie_bus_handoff_seconds(model, run_mode, pcie_bw);
+            base = (1.0 / (gpu_time + cpu_time + handoff_time)).max(0.1);
             if system.total_cpu_cores >= 8 {
                 base *= 1.1;
             }
@@ -3192,6 +3270,215 @@ mod tests {
             (tps_moe - expected).abs() / expected < 0.05,
             "moe tps {tps_moe:.2} vs hand-computed {expected:.2}"
         );
+    }
+
+    #[test]
+    fn test_pcie_bandwidth_config_override_wins() {
+        let config = CalcConfig {
+            pcie_bandwidth_gbps: Some(123.0),
+            ..CalcConfig::default()
+        };
+        assert_eq!(pcie_bandwidth_gbps(&config), 123.0);
+
+        // Zero/negative values are invalid and fall through to auto.
+        let config = CalcConfig {
+            pcie_bandwidth_gbps: Some(0.0),
+            ..CalcConfig::default()
+        };
+        assert!(pcie_bandwidth_gbps(&config) > 0.0);
+        assert!(pcie_bandwidth_gbps(&CalcConfig::default()) > 0.0);
+    }
+
+    #[test]
+    fn test_cpu_offload_pcie_handoff_term() {
+        // V2-a: the residual-stream handoff across the host↔GPU bus is sized
+        // from the (pinned) link bandwidth and added to the additive split.
+        let mut model = test_model("70B", 45.0, Some(42.0));
+        model.hidden_size = Some(8192);
+        let system = test_system_with_gpu(64.0, 24.0, "NVIDIA GeForce RTX 3090");
+
+        let config = CalcConfig {
+            ddr_bandwidth_gbps: Some(50.0),
+            pcie_bandwidth_gbps: Some(12.0),
+            ..CalcConfig::default()
+        };
+        let tps = estimate_tps(
+            &model,
+            "Q4_K_M",
+            &system,
+            RunMode::CpuOffload,
+            InferenceRuntime::LlamaCpp,
+            &config,
+        );
+
+        // Hand-compute: additive split + 2 crossings of an fp32 hidden state.
+        let bw = crate::hardware::gpu_memory_bandwidth_gbps("NVIDIA GeForce RTX 3090").unwrap();
+        let bpp = models::quant_bytes_per_param("Q4_K_M");
+        let weights_gb = 70.0 * bpp;
+        let vram = 24.0 * HYBRID_VRAM_USABLE_FRACTION;
+        let spill = spill_fraction(weights_gb, vram);
+        let handoff_s = 2.0 * 8192.0 * 4.0 / (12.0 * 1e9);
+        let expected = 1.0
+            / ((weights_gb * (1.0 - spill)) / (bw * config.efficiency)
+                + (weights_gb * spill) / 50.0
+                + handoff_s);
+        assert!(
+            (tps - expected).abs() / expected < 1e-6,
+            "handoff tps {tps:.4} must match hand-computed {expected:.4}"
+        );
+
+        // A faster measured link must recover throughput; a slower one must
+        // cost it. The term stays second-order at realistic values.
+        let fast = CalcConfig {
+            ddr_bandwidth_gbps: Some(50.0),
+            pcie_bandwidth_gbps: Some(63.0),
+            ..CalcConfig::default()
+        };
+        let tps_fast = estimate_tps(
+            &model,
+            "Q4_K_M",
+            &system,
+            RunMode::CpuOffload,
+            InferenceRuntime::LlamaCpp,
+            &fast,
+        );
+        assert!(
+            tps_fast > tps,
+            "gen5-class link ({tps_fast:.3}) must beat gen3-default ({tps:.3})"
+        );
+        assert!(
+            tps_fast < tps * 1.01,
+            "handoff is second-order, not dominant"
+        );
+    }
+
+    #[test]
+    fn test_moe_offload_pcie_handoff_scales_with_layers() {
+        // --n-cpu-moe keeps every FFN off-GPU: the hidden state crosses the
+        // bus twice PER LAYER, so deeper models pay proportionally more.
+        let mut moe = test_model("235B", 130.0, Some(120.0));
+        moe.is_moe = true;
+        moe.active_parameters = Some(22_000_000_000);
+        moe.hidden_size = Some(4096);
+        let system = test_system_with_gpu(256.0, 24.0, "NVIDIA GeForce RTX 3090");
+
+        let make_config = |layers: u32| -> (CalcConfig, LlmModel) {
+            (
+                CalcConfig {
+                    ddr_bandwidth_gbps: Some(50.0),
+                    pcie_bandwidth_gbps: Some(12.0),
+                    ..CalcConfig::default()
+                },
+                LlmModel {
+                    num_hidden_layers: Some(layers),
+                    ..moe.clone()
+                },
+            )
+        };
+
+        let (config_94, model_94) = make_config(94);
+        let tps_94 = estimate_tps(
+            &model_94,
+            "Q4_K_M",
+            &system,
+            RunMode::MoeOffload,
+            InferenceRuntime::LlamaCpp,
+            &config_94,
+        );
+        let (config_188, model_188) = make_config(188);
+        let tps_188 = estimate_tps(
+            &model_188,
+            "Q4_K_M",
+            &system,
+            RunMode::MoeOffload,
+            InferenceRuntime::LlamaCpp,
+            &config_188,
+        );
+        assert!(
+            tps_94 > tps_188,
+            "doubling bus-crossing layers must reduce tps: {tps_94:.2} vs {tps_188:.2}"
+        );
+
+        // Hand-computed for the 94-layer case: DDR roofline + per-layer
+        // crossings (mode factor applied on top).
+        let bw = crate::hardware::gpu_memory_bandwidth_gbps("NVIDIA GeForce RTX 3090").unwrap();
+        let bpp = models::quant_bytes_per_param("Q4_K_M");
+        let active_gb = 22.0 * bpp;
+        let handoff_s = 2.0 * 94.0 * 4096.0 * 4.0 / (12.0 * 1e9);
+        let raw = 1.0 / (active_gb / 50.0 + active_gb / (bw * config_94.efficiency) + handoff_s);
+        let expected =
+            (raw * config_94.run_mode_factors.for_run_mode(RunMode::MoeOffload)).max(0.1);
+        assert!(
+            (tps_94 - expected).abs() / expected < 1e-6,
+            "moe handoff tps {tps_94:.4} vs hand-computed {expected:.4}"
+        );
+    }
+
+    #[test]
+    fn test_pcie_handoff_skipped_without_arch_metadata() {
+        // Without a declared hidden size the transfer cannot be sized — it
+        // must be dropped entirely (adding 0.0), never guessed.
+        let mut model = test_model("70B", 45.0, Some(42.0));
+        model.is_moe = true;
+        model.active_parameters = Some(13_000_000_000);
+        assert_eq!(model.hidden_size, None);
+        let system = test_system_with_gpu(64.0, 24.0, "NVIDIA GeForce RTX 3090");
+        let pinned = CalcConfig {
+            ddr_bandwidth_gbps: Some(50.0),
+            pcie_bandwidth_gbps: Some(12.0),
+            ..CalcConfig::default()
+        };
+        let unbounded = CalcConfig {
+            ddr_bandwidth_gbps: Some(50.0),
+            pcie_bandwidth_gbps: Some(1_000_000.0),
+            ..CalcConfig::default()
+        };
+
+        for run_mode in [RunMode::CpuOffload, RunMode::MoeOffload] {
+            let a = estimate_tps(
+                &model,
+                "Q4_K_M",
+                &system,
+                run_mode,
+                InferenceRuntime::LlamaCpp,
+                &pinned,
+            );
+            let b = estimate_tps(
+                &model,
+                "Q4_K_M",
+                &system,
+                run_mode,
+                InferenceRuntime::LlamaCpp,
+                &unbounded,
+            );
+            assert_eq!(
+                a, b,
+                "missing hidden_size must skip the handoff term for {run_mode:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_estimate_basis_exposes_pcie_for_split_modes() {
+        // The basis must disclose the assumed interconnect so users can
+        // reproduce the estimate (issue #292 convention).
+        let mut model = test_model("70B", 45.0, Some(42.0));
+        model.hidden_size = Some(8192);
+        let system = test_system_with_gpu(64.0, 24.0, "NVIDIA GeForce RTX 3090");
+        let config = CalcConfig {
+            ddr_bandwidth_gbps: Some(50.0),
+            pcie_bandwidth_gbps: Some(25.0),
+            ..CalcConfig::default()
+        };
+
+        let hybrid = ModelFit::analyze_with_config(&model, &system, config.clone());
+        assert_eq!(hybrid.run_mode, RunMode::CpuOffload);
+        assert_eq!(hybrid.estimate_basis.pcie_bandwidth_gbps, Some(25.0));
+
+        let gpu_only_system = test_system_with_gpu(256.0, 192.0, "NVIDIA GeForce RTX 3090");
+        let resident = ModelFit::analyze_with_config(&model, &gpu_only_system, config);
+        assert_eq!(resident.run_mode, RunMode::Gpu);
+        assert_eq!(resident.estimate_basis.pcie_bandwidth_gbps, None);
     }
 
     #[test]

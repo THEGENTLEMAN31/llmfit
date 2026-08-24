@@ -2992,6 +2992,277 @@ pub fn gpu_memory_bandwidth_gbps(name: &str) -> Option<f64> {
     None
 }
 
+/// Negotiated PCIe link of a discrete GPU.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PcieLink {
+    /// Negotiated per-lane speed in GT/s (Gen3 = 8, Gen4 = 16, Gen5 = 32).
+    pub speed_gts: f64,
+    /// Negotiated lane count (x16 = 16).
+    pub width_lanes: u32,
+}
+
+impl PcieLink {
+    /// Raw link payload bandwidth in GB/s:
+    /// GT/s × lanes × 128b/130b encoding / 8 bits per byte.
+    ///
+    /// This is the line rate before TLP framing and ACK overheads —
+    /// achievable throughput sits a few GB/s below it, so treat the value as
+    /// an upper bound on host↔GPU transfer bandwidth.
+    pub fn bandwidth_gbps(&self) -> f64 {
+        self.speed_gts * self.width_lanes as f64 * (128.0 / 130.0) / 8.0
+    }
+}
+
+/// Map a PCIe generation number to its raw per-lane speed in GT/s.
+fn pcie_gen_speed_gts(generation: u32) -> Option<f64> {
+    match generation {
+        1 => Some(2.5),
+        2 => Some(5.0),
+        3 => Some(8.0),
+        4 => Some(16.0),
+        5 => Some(32.0),
+        6 => Some(64.0),
+        _ => None,
+    }
+}
+
+/// Parse a generation-style value ("Gen3", "PCIe Gen 2", "3") into GT/s.
+fn parse_pcie_generation_gts(value: &str) -> Option<f64> {
+    let digits = value.trim_start_matches(|c: char| !c.is_ascii_digit());
+    digits
+        .split_whitespace()
+        .next()?
+        .parse::<u32>()
+        .ok()
+        .and_then(pcie_gen_speed_gts)
+}
+
+/// Parse a link speed string into GT/s.
+///
+/// Handles sysfs `current_link_speed` ("16.0 GT/s PCIe") and the nvidia-smi
+/// variants ("8 GT/s", "Gen3", "PCIe Gen2").
+fn parse_pcie_speed_gts(text: &str) -> Option<f64> {
+    let trimmed = text.trim();
+    let lowered = trimmed.to_lowercase();
+    if let Some(rest) = lowered
+        .strip_prefix("pcie gen")
+        .or_else(|| lowered.strip_prefix("gen"))
+    {
+        return pcie_gen_speed_gts(rest.trim().parse::<u32>().ok()?);
+    }
+    trimmed.split_whitespace().next()?.parse::<f64>().ok()
+}
+
+/// Parse a link width string into a lane count. Accepts the sysfs form ("16")
+/// and the nvidia-smi forms ("16x", "x16").
+fn parse_pcie_width_lanes(text: &str) -> Option<u32> {
+    let token = text.split_whitespace().next()?;
+    token.trim_matches(|c| c == 'x' || c == 'X').parse().ok()
+}
+
+/// PCI base class 0x03 = display controller (VGA / 3D / other display).
+fn is_display_controller_class(class: &str) -> bool {
+    class.trim().to_ascii_lowercase().starts_with("0x03")
+}
+
+/// Read the PCIe link from one PCI device directory (Linux sysfs).
+///
+/// Prefers the reported maximum link (`max_link_speed`/`max_link_width`) over
+/// the negotiated one: GPUs aggressively downtrain an idle link (a Gen4 x16
+/// card routinely sits at "2.5 GT/s x8" between prompts), so `current_*`
+/// reflects the power state rather than the capacity available under load.
+/// The negotiated pair is only a fallback when max attributes are missing.
+fn pcie_link_from_pci_dir(dir: &std::path::Path) -> Option<PcieLink> {
+    if !cfg!(target_os = "linux") {
+        return None;
+    }
+    let class = std::fs::read_to_string(dir.join("class")).ok()?;
+    if !is_display_controller_class(&class) {
+        return None;
+    }
+    let speed = ["max_link_speed", "current_link_speed"]
+        .iter()
+        .find_map(|f| std::fs::read_to_string(dir.join(f)).ok())
+        .filter(|s| !s.trim().is_empty())?;
+    let width = ["max_link_width", "current_link_width"]
+        .iter()
+        .find_map(|f| std::fs::read_to_string(dir.join(f)).ok())?;
+    Some(PcieLink {
+        speed_gts: parse_pcie_speed_gts(&speed)?,
+        width_lanes: parse_pcie_width_lanes(&width)?,
+    })
+}
+
+/// Collect negotiated links of every display-class device under
+/// `/sys/bus/pci/devices`.
+fn sysfs_pcie_links() -> Vec<PcieLink> {
+    let mut links = Vec::new();
+    let Ok(entries) = std::fs::read_dir("/sys/bus/pci/devices") else {
+        return links;
+    };
+    for entry in entries.flatten() {
+        if let Some(link) = pcie_link_from_pci_dir(&entry.path()) {
+            links.push(link);
+        }
+    }
+    links
+}
+
+/// Query the first GPU's negotiated link from `nvidia-smi -q`. Fallback for
+/// platforms where sysfs is unavailable (Windows) — best-effort like the
+/// other nvidia-smi shells in this module. There is no standard WMI class
+/// exposing GPU PCIe link state, so the vendor tool is the honest option.
+fn nvidia_smi_pcie_link() -> Option<PcieLink> {
+    let output = std::process::Command::new("nvidia-smi")
+        .arg("-q")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_nvidia_smi_q_link(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// Extract Link Width / Speed / Generation values from `nvidia-smi -q`
+/// output. The first complete pair wins (GPU 0, matching the primary-GPU
+/// convention used elsewhere).
+///
+/// "Max" values are preferred over "Current": an idle GPU downtrains its
+/// link, so the negotiated state reports a fraction of the capacity that is
+/// available under load. "Current" is only a fallback.
+fn parse_nvidia_smi_q_link(text: &str) -> Option<PcieLink> {
+    let mut field = "";
+    let mut max_speed = None;
+    let mut max_width = None;
+    let mut cur_speed = None;
+    let mut cur_width = None;
+
+    for line in text.lines() {
+        let line = line.trim();
+        let lowered = line.to_lowercase();
+        if lowered.ends_with("width") {
+            field = "width";
+            continue;
+        }
+        if lowered.contains("generation") {
+            field = "generation";
+            continue;
+        }
+        if lowered.ends_with("speed") {
+            field = "speed";
+            continue;
+        }
+
+        let Some((tag, value)) = line.split_once(':') else {
+            continue;
+        };
+        let tag = tag.trim();
+        let value = value.trim();
+        let is_max = tag.eq_ignore_ascii_case("max");
+        let is_cur = tag.eq_ignore_ascii_case("current");
+        if !is_max && !is_cur {
+            continue;
+        }
+
+        // Older drivers print bare numbers ("Current : 1") under Link
+        // Generation — map them through the generation table instead of
+        // misreading them as GT/s.
+        let parse_speed = |value: &str| match field {
+            "generation" => parse_pcie_generation_gts(value),
+            _ => parse_pcie_speed_gts(value),
+        };
+
+        if is_max {
+            match field {
+                "width" if max_width.is_none() => max_width = parse_pcie_width_lanes(value),
+                _ => {
+                    if max_speed.is_none() {
+                        max_speed = parse_speed(value);
+                    }
+                }
+            }
+        } else {
+            match field {
+                "width" if cur_width.is_none() => cur_width = parse_pcie_width_lanes(value),
+                _ => {
+                    if cur_speed.is_none() {
+                        cur_speed = parse_speed(value);
+                    }
+                }
+            }
+        }
+    }
+
+    Some(PcieLink {
+        speed_gts: max_speed.or(cur_speed)?,
+        width_lanes: max_width.or(cur_width)?,
+    })
+}
+
+/// Best-effort PCIe link of the primary inference GPU, measured once per
+/// process. On Linux, sysfs link attributes are read for every display-class
+/// device and the fastest link is kept (the primary GPU holds the most VRAM,
+/// so absent per-address correlation its link is the best proxy; same-model
+/// multi-GPU rigs have identical links anyway). Elsewhere `nvidia-smi -q`
+/// provides the answer. Both sources report the link CAPABILITY — idle links
+/// downtrain, so the negotiated "current" state is only a fallback.
+pub fn measured_pcie_link() -> Option<PcieLink> {
+    static LINK: std::sync::OnceLock<Option<PcieLink>> = std::sync::OnceLock::new();
+    *LINK.get_or_init(|| {
+        #[cfg(target_os = "linux")]
+        {
+            let links = sysfs_pcie_links();
+            if !links.is_empty() {
+                return links.into_iter().max_by(|a, b| {
+                    a.bandwidth_gbps()
+                        .partial_cmp(&b.bandwidth_gbps())
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+            }
+        }
+        nvidia_smi_pcie_link()
+    })
+}
+
+/// Measured host↔GPU interconnect bandwidth in GB/s (raw link payload rate).
+pub fn measured_pcie_bandwidth_gbps() -> Option<f64> {
+    measured_pcie_link().map(|link| link.bandwidth_gbps())
+}
+
+/// True when at least one NVLink bridge between two GPUs shows up in
+/// `nvidia-smi topo -m`, cached per process.
+///
+/// NVLink carries GPU↔GPU traffic at hundreds of GB/s, far above any PCIe
+/// link, so multi-GPU placement models (tensor/pipeline parallel) must not
+/// apply PCIe bounds between bridged cards. Host↔GPU transfers are NOT
+/// affected — NVLink never replaces the root-complex path.
+pub fn nvlink_detected() -> bool {
+    static NVLINK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *NVLINK.get_or_init(|| {
+        std::process::Command::new("nvidia-smi")
+            .args(["topo", "-m"])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .is_some_and(|o| parse_nvlink_topo_matrix(&String::from_utf8_lossy(&o.stdout)))
+    })
+}
+
+/// A topology matrix cell like "NV12" marks an NVLink bridge between two
+/// GPUs; PIX/PXB/PHB/NODE/SYS cells are plain PCIe/platform paths.
+fn parse_nvlink_topo_matrix(text: &str) -> bool {
+    text.lines()
+        .filter(|line| line.starts_with("GPU"))
+        .any(|line| {
+            line.split_whitespace().any(|cell| {
+                cell.len() > 2
+                    && cell.is_ascii()
+                    && cell.starts_with("NV")
+                    && cell[2..].bytes().all(|b| b.is_ascii_digit())
+            })
+        })
+}
+
 /// Returns the NVIDIA compute capability (major, minor) for a known GPU name.
 /// Used to determine compatibility with quantization formats that require
 /// specific hardware features (e.g. AWQ requires Turing+ / cc >= 7.5).
@@ -3538,6 +3809,184 @@ mod tests {
         assert_eq!(gpus.len(), 1);
         assert_eq!(gpus[0].count, 2);
         assert!(!gpus[0].unified_memory);
+    }
+
+    // ── PCIe link measurement (V2-a) ────────────────────────────────
+
+    #[test]
+    fn test_pcie_bandwidth_formula() {
+        // BW = GT/s × lanes × 128b/130b encoding / 8 bits per byte.
+        let gen3_x16 = super::PcieLink {
+            speed_gts: 8.0,
+            width_lanes: 16,
+        };
+        assert!((gen3_x16.bandwidth_gbps() - 15.7538).abs() < 0.001);
+
+        let gen4_x16 = super::PcieLink {
+            speed_gts: 16.0,
+            width_lanes: 16,
+        };
+        assert!((gen4_x16.bandwidth_gbps() - 31.5077).abs() < 0.001);
+
+        let gen5_x16 = super::PcieLink {
+            speed_gts: 32.0,
+            width_lanes: 16,
+        };
+        assert!((gen5_x16.bandwidth_gbps() - 63.0154).abs() < 0.001);
+
+        // Halving lanes halves bandwidth.
+        let gen4_x8 = super::PcieLink {
+            speed_gts: 16.0,
+            width_lanes: 8,
+        };
+        assert!((gen4_x8.bandwidth_gbps() - gen3_x16.bandwidth_gbps()).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_parse_pcie_speed_gts_variants() {
+        assert_eq!(super::parse_pcie_speed_gts("16.0 GT/s PCIe\n"), Some(16.0));
+        assert_eq!(super::parse_pcie_speed_gts("8.0 GT/s"), Some(8.0));
+        assert_eq!(super::parse_pcie_speed_gts("Gen3"), Some(8.0));
+        assert_eq!(super::parse_pcie_speed_gts("PCIe Gen2"), Some(5.0));
+        assert_eq!(super::parse_pcie_speed_gts("64.0 GT/s"), Some(64.0));
+        assert_eq!(super::parse_pcie_speed_gts("unknown"), None);
+        assert_eq!(super::parse_pcie_speed_gts(""), None);
+        assert_eq!(super::parse_pcie_speed_gts("Gen9"), None);
+    }
+
+    #[test]
+    fn test_parse_pcie_width_lanes_variants() {
+        assert_eq!(super::parse_pcie_width_lanes("16\n"), Some(16));
+        assert_eq!(super::parse_pcie_width_lanes("16x"), Some(16));
+        assert_eq!(super::parse_pcie_width_lanes("x8"), Some(8));
+        assert_eq!(super::parse_pcie_width_lanes(" 4 "), Some(4));
+        assert_eq!(super::parse_pcie_width_lanes(""), None);
+        assert_eq!(super::parse_pcie_width_lanes("wide"), None);
+    }
+
+    #[test]
+    fn test_parse_nvidia_smi_q_link_modern_and_legacy() {
+        // Modern drivers expose both Link Generation and Link Speed (GT/s).
+        // Max (capability) wins over Current, which may be idle-downtrained.
+        let modern = "\
+            ============NVSM============\n\
+            GPU 00000000:01:00.0\n\
+            GPU Link Info\n\
+                PCIE\n\
+                    Link Width\n\
+                        Max : 16x\n\
+                        Current : 8x\n\
+                    Link Generation\n\
+                        Max : Gen5\n\
+                        Current : Gen4\n\
+                    Link Speed\n\
+                        Max : 32 GT/s\n\
+                        Current : 16 GT/s\n";
+        let link = super::parse_nvidia_smi_q_link(modern).expect("modern layout");
+        assert_eq!(link.speed_gts, 32.0);
+        assert_eq!(link.width_lanes, 16);
+
+        // Legacy drivers stop at a bare generation number.
+        let legacy = "\
+            GPU Link Info\n\
+                PCIE\n\
+                    Link Width\n\
+                        Max : 16x\n\
+                        Current : 16x\n\
+                    Link Generation\n\
+                        Max : 3\n\
+                        Current : 1\n";
+        let link = super::parse_nvidia_smi_q_link(legacy).expect("legacy layout");
+        assert_eq!(link.speed_gts, 8.0);
+        assert_eq!(link.width_lanes, 16);
+
+        // Without any Max line, the negotiated pair is used as fallback.
+        let current_only = "\
+            GPU Link Info\n\
+                PCIE\n\
+                    Link Width\n\
+                        Current : 8x\n\
+                    Link Speed\n\
+                        Current : 16 GT/s\n";
+        let link = super::parse_nvidia_smi_q_link(current_only).expect("current-only layout");
+        assert_eq!(link.speed_gts, 16.0);
+        assert_eq!(link.width_lanes, 8);
+
+        assert_eq!(super::parse_nvidia_smi_q_link("no link info here"), None);
+    }
+
+    #[test]
+    fn test_parse_nvlink_topo_matrix() {
+        let nvlinked = "\
+        \tGPU0\tGPU1\tCPU Affinity\tNUMA Affinity\n\
+        GPU0\t X \tNV12\t0-31\tN/A\n\
+        GPU1\tNV12\t X \t0-31\tN/A\n\
+        Legend:\n\
+          NV# = Network -- NVLink\n";
+        assert!(super::parse_nvlink_topo_matrix(nvlinked));
+
+        let pcie_only = "\
+        \tGPU0\tGPU1\tCPU Affinity\tNUMA Affinity\n\
+        GPU0\t X \tPIX\tSYS\tN/A\n\
+        GPU1\tPIX\t X \tSYS\tN/A\n";
+        assert!(!super::parse_nvlink_topo_matrix(pcie_only));
+        assert!(!super::parse_nvlink_topo_matrix(""));
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_pcie_link_read_from_pci_dir_layout() {
+        let root = std::env::temp_dir().join(format!(
+            "llmfit-test-pcie-sysfs-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+
+        let dgpu = root.join("gpu-dev");
+        std::fs::create_dir_all(&dgpu).unwrap();
+        std::fs::write(dgpu.join("class"), "0x030200\n").unwrap();
+        // Capability wins over the idle-downtrained negotiated state.
+        std::fs::write(dgpu.join("max_link_speed"), "16.0 GT/s PCIe\n").unwrap();
+        std::fs::write(dgpu.join("max_link_width"), "16\n").unwrap();
+        std::fs::write(dgpu.join("current_link_speed"), "2.5 GT/s PCIe\n").unwrap();
+        std::fs::write(dgpu.join("current_link_width"), "8\n").unwrap();
+        let link = super::pcie_link_from_pci_dir(&dgpu).expect("display class device");
+        assert_eq!(link.speed_gts, 16.0);
+        assert_eq!(link.width_lanes, 16);
+
+        // Devices without max attributes fall back to the negotiated pair.
+        let legacy = root.join("legacy-gpu");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(legacy.join("class"), "0x030000\n").unwrap();
+        std::fs::write(legacy.join("current_link_speed"), "8.0 GT/s PCIe\n").unwrap();
+        std::fs::write(legacy.join("current_link_width"), "16\n").unwrap();
+        let link = super::pcie_link_from_pci_dir(&legacy).expect("current-only fallback");
+        assert_eq!(link.speed_gts, 8.0);
+        assert_eq!(link.width_lanes, 16);
+
+        // Non-display functions (audio, USB, ...) carry no inference link.
+        let audio = root.join("hd-audio");
+        std::fs::create_dir_all(&audio).unwrap();
+        std::fs::write(audio.join("class"), "0x040300\n").unwrap();
+        std::fs::write(audio.join("max_link_speed"), "8.0 GT/s PCIe\n").unwrap();
+        std::fs::write(audio.join("max_link_width"), "16\n").unwrap();
+        assert_eq!(super::pcie_link_from_pci_dir(&audio), None);
+
+        // Display class but missing sysfs link files → None, never guessed.
+        let partial = root.join("partial-dev");
+        std::fs::create_dir_all(&partial).unwrap();
+        std::fs::write(partial.join("class"), "0x030000\n").unwrap();
+        assert_eq!(super::pcie_link_from_pci_dir(&partial), None);
+
+        // iGPU reporting an unknown/downtrained state parses as nothing.
+        let unknown = root.join("unknown-state");
+        std::fs::create_dir_all(&unknown).unwrap();
+        std::fs::write(unknown.join("class"), "0x030000\n").unwrap();
+        std::fs::write(unknown.join("max_link_speed"), "Unknown\n").unwrap();
+        std::fs::write(unknown.join("max_link_width"), "0\n").unwrap();
+        assert_eq!(super::pcie_link_from_pci_dir(&unknown), None);
+
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
