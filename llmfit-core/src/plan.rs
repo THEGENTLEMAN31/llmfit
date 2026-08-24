@@ -934,6 +934,8 @@ pub fn llamacpp_server_command(
     system: &SystemSpecs,
     model_ref: &str,
     expert_bytes_per_layer_gb: Option<f64>,
+    serving_max_num_seqs: Option<u32>,
+    tensor_parallel_size: Option<u32>,
 ) -> Option<String> {
     let model_ref = model_ref.trim();
     if model_ref.is_empty() {
@@ -963,6 +965,22 @@ pub fn llamacpp_server_command(
                 Some(n) => format!("{} -ngl 99 --n-cpu-moe {}", base, n),
                 None => format!("{} -ngl 99", base),
             }
+        }
+        // vLLM batched serving: generate a vllm serve command (V2-d).
+        RunMode::Serving => {
+            let tp = tensor_parallel_size.unwrap_or(1);
+            let tp_flag = if tp > 1 {
+                format!(" --tensor-parallel-size {}", tp)
+            } else {
+                String::new()
+            };
+            format!(
+                "vllm serve {} --max-num-seqs {} --max-model-len {}{}",
+                model_ref,
+                serving_max_num_seqs.unwrap_or(256),
+                plan.context,
+                tp_flag
+            )
         }
     };
 
@@ -2262,6 +2280,8 @@ mod tests {
             &gpu_specs,
             "-hf org/model:Q4_K_M",
             None,
+            None,
+            None,
         )
         .unwrap();
         assert!(
@@ -2282,8 +2302,16 @@ mod tests {
         tight_specs.backend = GpuBackend::Cuda;
         let plan = estimate_model_plan(&moe, &req, &tight_specs).unwrap();
         if plan.current.run_mode == RunMode::MoeOffload {
-            let cmd = llamacpp_server_command(&moe, &plan, &tight_specs, "-m ./model.gguf", None)
-                .unwrap();
+            let cmd = llamacpp_server_command(
+                &moe,
+                &plan,
+                &tight_specs,
+                "-m ./model.gguf",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
             assert!(cmd.contains("-ngl 99 --n-cpu-moe "), "{cmd}");
         }
     }
@@ -2298,14 +2326,22 @@ mod tests {
         };
         let plan = estimate_model_plan(&test_model(), &req, &test_specs()).unwrap();
         assert_eq!(
-            llamacpp_server_command(&test_model(), &plan, &test_specs(), "   ", None),
+            llamacpp_server_command(&test_model(), &plan, &test_specs(), "   ", None, None, None),
             None
         );
 
         let mut q8 = plan.clone();
         q8.kv_quant = KvQuant::Q8_0;
-        let cmd =
-            llamacpp_server_command(&test_model(), &q8, &test_specs(), "-m m.gguf", None).unwrap();
+        let cmd = llamacpp_server_command(
+            &test_model(),
+            &q8,
+            &test_specs(),
+            "-m m.gguf",
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         assert!(cmd.contains("-ctv q8_0"), "{cmd}");
     }
 }

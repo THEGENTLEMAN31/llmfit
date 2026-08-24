@@ -109,6 +109,7 @@ pub fn run_mode_code(run_mode: RunMode) -> &'static str {
         RunMode::MoeOffload => "moe_offload",
         RunMode::CpuOffload => "cpu_offload",
         RunMode::CpuOnly => "cpu_only",
+        RunMode::Serving => "serving",
     }
 }
 
@@ -135,7 +136,7 @@ pub(crate) fn generate_llamabench_command(fit: &ModelFit) -> Option<String> {
     let ngl = match fit.run_mode {
         RunMode::Gpu => "99",
         RunMode::CpuOnly => "0",
-        _ => return None,
+        _ => return None, // Offload/serving modes have no single ngl value
     };
     // llama-bench needs a local GGUF path (no -hf support); point users at
     // `llmfit download`, which prints the destination path.

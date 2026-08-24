@@ -21,7 +21,7 @@ use llmfit_core::bench;
 use llmfit_core::fit::{ModelFit, SortColumn, backend_compatible};
 use llmfit_core::hardware::SystemSpecs;
 use llmfit_core::models::{ModelDatabase, matches_provider_filter};
-use llmfit_core::plan::{PlanRequest, estimate_model_plan, resolve_model_selector};
+use llmfit_core::plan::{PlanRequest, resolve_model_selector};
 use llmfit_core::quality;
 use llmfit_core::share;
 
@@ -2358,7 +2358,10 @@ fn run_plan(
         target_tps,
         kv_quant,
     };
-    let mut plan = estimate_model_plan(model, &request, &specs)?;
+    // Use default CalcConfig; serving flags not exposed via CLI yet.
+    let config = llmfit_core::fit::CalcConfig::default();
+    let mut plan =
+        llmfit_core::plan::estimate_model_plan_with_config(model, &request, &specs, &config)?;
     // No honest command exists when nothing fits: emitting `-ngl` numbers
     // for a machine that cannot hold the model would just produce an OOM.
     plan.llamacpp_command = if plan.current.fit_level == llmfit_core::fit::FitLevel::TooTight {
@@ -2370,6 +2373,8 @@ fn run_plan(
             &specs,
             &pm.model_ref,
             pm.expert_bytes_per_layer_gb,
+            config.serving_max_num_seqs,
+            config.tensor_parallel_size,
         )
     };
 

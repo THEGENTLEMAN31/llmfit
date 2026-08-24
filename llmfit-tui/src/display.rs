@@ -734,6 +734,7 @@ fn llamacpp_ngl_args_for_support(
             "-ngl auto"
         }),
         RunMode::TensorParallel => None,
+        RunMode::Serving => None, // vLLM serving uses vllm serve, not llama.cpp
     }
 }
 

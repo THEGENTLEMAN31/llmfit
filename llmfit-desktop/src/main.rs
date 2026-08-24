@@ -114,6 +114,7 @@ fn get_model_fits() -> Result<Vec<ModelFitInfo>, String> {
                 RunMode::CpuOnly => "CPU Only".to_string(),
                 RunMode::MoeOffload => "MoE Offload".to_string(),
                 RunMode::TensorParallel => "Tensor Parallel".to_string(),
+                RunMode::Serving => "Serving".to_string(),
             },
             score: f.score,
             memory_required_gb: f.memory_required_gb,

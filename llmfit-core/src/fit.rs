@@ -54,6 +54,18 @@ pub struct CalcConfig {
     /// 0.25 GB).
     #[serde(default)]
     pub vram_display_reserve_gb: Option<f64>,
+    /// Maximum concurrent sequences for vLLM-style batched serving (V2-d).
+    /// Used to size the paged KV cache: max_num_seqs × full_context KV.
+    /// None = single-request mode (legacy behaviour).
+    #[serde(default)]
+    pub serving_max_num_seqs: Option<u32>,
+    /// Paged KV allocator overhead fraction for serving (V2-d). Observed band
+    /// 5–15 % of the paged KV cache; default 10 %. Clamped to [0.05, 0.25].
+    #[serde(default = "default_paged_overhead_fraction")]
+    pub serving_paged_overhead_fraction: f64,
+    /// Tensor parallel size for vLLM serving (V2-d). None = auto (1).
+    #[serde(default)]
+    pub tensor_parallel_size: Option<u32>,
 }
 
 impl Default for CalcConfig {
@@ -67,6 +79,9 @@ impl Default for CalcConfig {
             pcie_bandwidth_gbps: None,
             allocator_cache_fraction: default_allocator_cache_fraction(),
             vram_display_reserve_gb: None,
+            serving_max_num_seqs: None,
+            serving_paged_overhead_fraction: default_paged_overhead_fraction(),
+            tensor_parallel_size: None,
         }
     }
 }
@@ -77,6 +92,10 @@ fn default_efficiency() -> f64 {
 
 fn default_allocator_cache_fraction() -> f64 {
     crate::models::DEFAULT_ALLOCATOR_CACHE_FRACTION
+}
+
+fn default_paged_overhead_fraction() -> f64 {
+    0.10
 }
 
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
@@ -219,6 +238,7 @@ pub enum RunMode {
     CpuOffload,     // Partial GPU offload, spills to system RAM -- mixed
     CpuOnly,        // Entirely in system RAM, no GPU -- slow
     TensorParallel, // Distributed via NCCL across cluster nodes
+    Serving,        // Batched vLLM-style serving (multi-request, paged KV)
 }
 
 /// Multi-dimensional score components (0-100 each).
@@ -572,67 +592,64 @@ impl ModelFit {
                         &mut notes,
                     )
                 }
+            } else if config.serving_max_num_seqs.is_some()
+                && system.has_gpu
+                && !system.unified_memory
+            {
+                // V2-d: vLLM batched serving path. Requires a discrete GPU and an
+                // explicit serving configuration. Uses the paged KV formula:
+                // max_num_seqs × full_context_KV + paged overhead.
+                let serving_mem = model.estimate_serving_memory_gb(
+                    model.quantization.as_str(),
+                    config.serving_max_num_seqs.unwrap(),
+                    model.context_length,
+                    KvQuant::Fp16,
+                    config.serving_paged_overhead_fraction,
+                );
+                notes.push(format!(
+                    "Serving (vLLM): max_num_seqs={}, paged KV + {:.0}% overhead",
+                    config.serving_max_num_seqs.unwrap(),
+                    config.serving_paged_overhead_fraction * 100.0
+                ));
+                // Effective VRAM pool after V2-b reserves
+                let system_vram = vram_reserve_components(
+                    system.total_gpu_vram_gb.unwrap_or(0.0),
+                    system,
+                    &config,
+                )
+                .0;
+                if serving_mem <= system_vram {
+                    (RunMode::Serving, serving_mem, system_vram)
+                } else {
+                    notes.push("Serving: model exceeds VRAM, falling back".to_string());
+                    // Fall through to regular GPU logic
+                    choose_gpu_path(
+                        model,
+                        system,
+                        system_vram,
+                        min_vram,
+                        runtime,
+                        estimation_ctx,
+                        allocator_cache_fraction,
+                        &mut notes,
+                    )
+                }
             } else if let Some(raw_vram) = system.total_gpu_vram_gb {
                 // Effective VRAM across all same-model GPUs after the V2-b
                 // environment reserve + fragmentation floor. Multi-GPU
                 // inference (tensor splitting) is supported by llama.cpp,
                 // vLLM, etc.
                 let system_vram = vram_reserve_components(raw_vram, system, &config).0;
-                // Use total VRAM across all same-model GPUs for fit scoring.
-                if model.is_moe && min_vram <= system_vram {
-                    // Fits in VRAM -- GPU path
-                    notes.push("GPU: model loaded into VRAM".to_string());
-                    if model.is_moe {
-                        notes.push(format!(
-                            "MoE: all {} experts loaded in VRAM (optimal)",
-                            model.num_experts.unwrap_or(0)
-                        ));
-                    }
-                    (RunMode::Gpu, min_vram, system_vram)
-                } else if model.is_moe {
-                    // MoE model doesn't fit at default quant — but check if the full
-                    // model fits at the best available quant before falling to offload.
-                    // Many runtimes (llama.cpp, Ollama) load ALL experts into VRAM when
-                    // the quantized model file fits, avoiding DDR bandwidth bottleneck.
-                    if let Some((best_q, best_mem)) = best_quant_for_runtime_budget(
-                        model,
-                        runtime,
-                        system_vram,
-                        estimation_ctx,
-                        allocator_cache_fraction,
-                    ) && best_mem <= system_vram
-                    {
-                        notes.push(
-                            "GPU: all MoE experts loaded into VRAM (quantized fit)".to_string(),
-                        );
-                        notes.push(format!(
-                            "MoE: all {} experts in VRAM at {} ({:.1} GB)",
-                            model.num_experts.unwrap_or(0),
-                            best_q,
-                            best_mem,
-                        ));
-                        (RunMode::Gpu, best_mem, system_vram)
-                    } else {
-                        // Full model doesn't fit — try expert offloading
-                        moe_offload_path(model, system, system_vram, min_vram, runtime, &mut notes)
-                    }
-                } else if let Some((_, best_mem)) = choose_quant(system_vram) {
-                    notes.push("GPU: model loaded into VRAM".to_string());
-                    (RunMode::Gpu, best_mem, system_vram)
-                } else if let Some((_, best_mem)) = choose_quant(system.available_ram_gb) {
-                    // Doesn't fit in VRAM, spill to system RAM
-                    notes.push("GPU: insufficient VRAM, spilling to system RAM".to_string());
-                    notes.push("Performance will be significantly reduced".to_string());
-                    (RunMode::CpuOffload, best_mem, system.available_ram_gb)
-                } else {
-                    // Doesn't fit anywhere -- report against VRAM since GPU is preferred
-                    notes.push("Insufficient VRAM and system RAM".to_string());
-                    notes.push(format!(
-                        "Need {:.1} GB VRAM or {:.1} GB system RAM",
-                        min_vram, model.min_ram_gb
-                    ));
-                    (RunMode::Gpu, default_mem_required, system_vram)
-                }
+                choose_gpu_path(
+                    model,
+                    system,
+                    system_vram,
+                    min_vram,
+                    runtime,
+                    estimation_ctx,
+                    allocator_cache_fraction,
+                    &mut notes,
+                )
             } else {
                 // GPU detected but VRAM unknown -- fall through to CPU
                 notes.push("GPU detected but VRAM unknown".to_string());
@@ -926,6 +943,7 @@ impl ModelFit {
             RunMode::MoeOffload => "MoE",
             RunMode::CpuOffload => "CPU+GPU",
             RunMode::CpuOnly => "CPU",
+            RunMode::Serving => "Serving",
         }
     }
 }
@@ -935,6 +953,7 @@ impl ModelFit {
 /// - CpuOffload: caps at Good.
 /// - CpuOnly: caps at Good -- no GPU acceleration so never Perfect, but a model
 ///   that fits with comfortable headroom is genuinely runnable, not Marginal.
+/// - Serving (vLLM batched): same headroom bands as GPU, since it also runs on GPU.
 fn score_fit(
     mem_required: f64,
     mem_available: f64,
@@ -946,7 +965,7 @@ fn score_fit(
     }
 
     match run_mode {
-        RunMode::Gpu | RunMode::TensorParallel => {
+        RunMode::Gpu | RunMode::TensorParallel | RunMode::Serving => {
             if recommended <= mem_available {
                 FitLevel::Perfect
             } else if mem_available >= mem_required * 1.2 {
@@ -983,6 +1002,95 @@ fn score_fit(
                 FitLevel::Marginal
             }
         }
+    }
+}
+
+/// Discrete-GPU path selection (llama.cpp single-request).
+/// Separated for reuse by the serving fallback path (V2-d).
+#[allow(clippy::too_many_arguments)]
+fn choose_gpu_path(
+    model: &LlmModel,
+    system: &SystemSpecs,
+    system_vram: f64,
+    min_vram: f64,
+    runtime: InferenceRuntime,
+    estimation_ctx: u32,
+    allocator_cache_fraction: f64,
+    notes: &mut Vec<String>,
+) -> (RunMode, f64, f64) {
+    // Use total VRAM across all same-model GPUs for fit scoring.
+    if model.is_moe && min_vram <= system_vram {
+        // Fits in VRAM -- GPU path
+        notes.push("GPU: model loaded into VRAM".to_string());
+        if model.is_moe {
+            notes.push(format!(
+                "MoE: all {} experts loaded in VRAM (optimal)",
+                model.num_experts.unwrap_or(0)
+            ));
+        }
+        (RunMode::Gpu, min_vram, system_vram)
+    } else if model.is_moe {
+        // MoE model doesn't fit at default quant — but check if the full
+        // model fits at the best available quant before falling to offload.
+        // Many runtimes (llama.cpp, Ollama) load ALL experts into VRAM when
+        // the quantized model file fits, avoiding DDR bandwidth bottleneck.
+        if let Some((best_q, best_mem)) = best_quant_for_runtime_budget(
+            model,
+            runtime,
+            system_vram,
+            estimation_ctx,
+            allocator_cache_fraction,
+        ) && best_mem <= system_vram
+        {
+            notes.push("GPU: all MoE experts loaded into VRAM (quantized fit)".to_string());
+            notes.push(format!(
+                "MoE: all {} experts in VRAM at {} ({:.1} GB)",
+                model.num_experts.unwrap_or(0),
+                best_q,
+                best_mem,
+            ));
+            (RunMode::Gpu, best_mem, system_vram)
+        } else {
+            // Full model doesn't fit — try expert offloading
+            moe_offload_path(model, system, system_vram, min_vram, runtime, notes)
+        }
+    } else if let Some((_, best_mem)) = best_quant_for_runtime_budget(
+        model,
+        runtime,
+        system_vram,
+        estimation_ctx,
+        allocator_cache_fraction,
+    ) {
+        notes.push("GPU: model loaded into VRAM".to_string());
+        (RunMode::Gpu, best_mem, system_vram)
+    } else if let Some((_, best_mem)) = best_quant_for_runtime_budget(
+        model,
+        runtime,
+        system.available_ram_gb,
+        estimation_ctx,
+        allocator_cache_fraction,
+    ) {
+        // Doesn't fit in VRAM, spill to system RAM
+        notes.push("GPU: insufficient VRAM, spilling to system RAM".to_string());
+        notes.push("Performance will be significantly reduced".to_string());
+        (RunMode::CpuOffload, best_mem, system.available_ram_gb)
+    } else {
+        // Doesn't fit anywhere -- report against VRAM since GPU is preferred
+        notes.push("Insufficient VRAM and system RAM".to_string());
+        notes.push(format!(
+            "Need {:.1} GB VRAM or {:.1} GB system RAM",
+            min_vram, model.min_ram_gb
+        ));
+        (
+            RunMode::Gpu,
+            model.estimate_memory_gb_with_reserve(
+                model.quantization.as_str(),
+                estimation_ctx,
+                KvQuant::Fp16,
+                allocator_cache_fraction,
+            ),
+            system_vram,
+        )
     }
 }
 
@@ -1911,6 +2019,7 @@ impl RunModeFactors {
             RunMode::MoeOffload => self.moe_offload,
             RunMode::CpuOffload => self.cpu_offload,
             RunMode::CpuOnly => self.cpu_only,
+            RunMode::Serving => self.gpu, // Serving runs on GPU like Gpu
         }
     }
 }

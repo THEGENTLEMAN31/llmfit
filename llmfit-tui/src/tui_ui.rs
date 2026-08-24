@@ -887,6 +887,7 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect, tc: &ThemeColors) {
                 llmfit_core::fit::RunMode::MoeOffload => tc.mode_moe,
                 llmfit_core::fit::RunMode::CpuOffload => tc.mode_offload,
                 llmfit_core::fit::RunMode::CpuOnly => tc.mode_cpu,
+                llmfit_core::fit::RunMode::Serving => tc.mode_gpu, // Serving runs on GPU
             };
 
             let score_color = if fit.score >= 70.0 {
@@ -1649,6 +1650,7 @@ fn draw_multi_compare(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeColors
                     llmfit_core::fit::RunMode::MoeOffload => tc.mode_moe,
                     llmfit_core::fit::RunMode::CpuOffload => tc.mode_offload,
                     llmfit_core::fit::RunMode::CpuOnly => tc.mode_cpu,
+                    llmfit_core::fit::RunMode::Serving => tc.mode_gpu,
                 };
                 Style::default().fg(c)
             })

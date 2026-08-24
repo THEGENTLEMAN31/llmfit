@@ -934,6 +934,42 @@ impl LlmModel {
         model_mem + kv_cache + self.runtime_reserve_gb(ctx, working_set, allocator_cache_fraction)
     }
 
+    /// Estimate VRAM needed for batched vLLM-style serving (V2-d).
+    ///
+    /// Formula: model_weights + paged_KV + serving_overhead
+    ///
+    /// - model_weights: same as single-request at given quant
+    /// - paged_KV: `max_num_seqs * kv_per_seq` where kv_per_seq is the
+    ///   per-sequence KV cache at `context_length` (full context per sequence)
+    /// - serving_overhead: paged KV allocator overhead (5–15 % of paged_KV)
+    ///   plus a small fixed runtime reserve (~0.4 GB for CUDA context)
+    ///
+    /// This is distinct from `estimate_memory_gb_with_kv` which assumes a
+    /// single request at `ctx` tokens. Serving holds `max_num_seqs` full
+    /// contexts simultaneously in the paged KV cache.
+    pub fn estimate_serving_memory_gb(
+        &self,
+        quant: &str,
+        max_num_seqs: u32,
+        context_length: u32,
+        kv: KvQuant,
+        paged_overhead_fraction: f64,
+    ) -> f64 {
+        let bpp = quant_bpp(quant);
+        let params = self.params_b();
+        let model_mem = params * bpp;
+
+        // Per-sequence KV at full context length
+        let kv_per_seq = self.kv_cache_gb(context_length, kv);
+        let paged_kv = f64::from(max_num_seqs) * kv_per_seq;
+
+        // Paged allocator overhead (5–15 %) + runtime context (~0.4 GB)
+        let serving_overhead =
+            RUNTIME_CONTEXT_RESERVE_GB + paged_overhead_fraction.clamp(0.05, 0.25) * paged_kv;
+
+        model_mem + paged_kv + serving_overhead
+    }
+
     /// Runtime reserve in GB held on top of weights + KV cache (V2-b).
     ///
     /// Components:
