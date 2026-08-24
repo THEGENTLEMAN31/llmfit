@@ -136,7 +136,7 @@ Légère divergence avec le rapport initial : **le HEAD actuel contient déjà d
 **Milestone V1 : tag `v1-introspection` + push.**
 
 ### V2 « Placement & Hybride »
-- [ ] **V2-a PCIe** : lecture `/sys/bus/pci/devices/<gpu>/current_link_speed|current_link_width` (Linux), WMI (Windows) ; `BW_pcie = GT/s × lanes × 128/130 / 8` Go/s. Brancher dans le modèle C1 (remplace l'estimation par défaut). NVLink détecté (CUDA topo si dispo) → bypass PCIe.
+- [x] **V2-a PCIe** — ✅ **TERMINÉ** (commit a93cc1e) : lecture `/sys/bus/pci/devices/<gpu>/current_link_speed|current_link_width` (Linux), WMI (Windows) ; `BW_pcie = GT/s × lanes × 128/130 / 8` Go/s. Brancher dans le modèle C1 (remplace l'estimation par défaut). NVLink détecté (CUDA topo si dispo) → bypass PCIe.
 - [ ] **V2-b Fragmentation VRAM réaliste** (aujourd'hui forfait plat 0,5 Go, models.rs:888-890) : réserve = ctx CUDA ~300-500 Mo + activations f(ctx,batch) + allocator caching 5-15 % paramétrable + réserve affichage (Windows/DWM 0,5-1 Go ; lire `memory.used` NVML/sysfs quand possible). Règle : réserve globale `max(10 %, 2 Gio)`.
 - [ ] **V2-c Bench RAM honnête** : multithread read+write (le bench actuel est memcpy lecture-seule mono-pattern), awareness NUMA (/sys/devices/system/node, premier nœud du socket GPU si identifiable).
 - [ ] **V2-d Serving batch** : KV dimensionnée `max_num_seqs × kv_seq` + overhead paged (~5-15 %) ; mode vLLM séparé du mode llama.cpp mono-requête ; lever le rejet batchSize>1 du calibrage (benchmarks.rs:452-464) avec colonne batch.
@@ -217,6 +217,16 @@ Légère divergence avec le rapport initial : **le HEAD actuel contient déjà d
 - Tests : +8 unitaires (SWA cap, pont GGUF, scaling shards, N MoE, formes de commande) + 1 smoke CLI. Workspace : **711 verts**, clippy propre sur le nouveau code, fmt OK.
 - **NEXT** : Milestone V1 → tag `v1-introspection` + push ; puis V2-a (PCIe).
 
+### 2026-08-24 — Session 4 — ✅ V2-a TERMINÉ (commit a93cc1e)
+- **Détection** (hardware.rs) : `PcieLink{speed_gts, width_lanes}` + `bandwidth_gbps() = GT/s × lanes × 128/130 / 8` (gen3 x16 ≈ 15,75 Go/s brut ligne). Linux : scan `/sys/bus/pci/devices/*` de classe `0x03*`, lecture des attributs lien ; repli cross-platform via `nvidia-smi -q` (blocs Link Width/Speed/Generation, formats modernes « GT/s » ET legacy « Gen3 »/« 3 » gérés). Caché OnceLock : `measured_pcie_link()`, `measured_pcie_bandwidth_gbps()`, `nvlink_detected()` (parse `nvidia-smi topo -m`, cellules NV#).
+- **⚠️ Piège découvert sur machine réelle** : les GPU downtrainent leur lien au repos — la dGPU ici rapporte « 2.5 GT/s x8 » en courant mais « 16 GT/s x16 » en max (~10× d'écart). On lit donc `max_link_*` / « Max » nvidia-smi EN PRIORITÉ (capacité sous charge), `current_*`/« Current » en simple repli ; iGPU « Unknown/255 » proprement ignoré. Ajouté à §7.
+- **Écart vs roadmap (WMI)** : aucune classe WMI standard n'expose l'état du lien PCIe d'un GPU → parse `nvidia-smi -q`, pattern shell déjà établi dans le repo ; documenté dans hardware.rs.
+- **Branchement C1** (fit.rs) : résolution miroir du DDR — `CalcConfig.pcie_bandwidth_gbps > env LLMFIT_PCIE_BANDWIDTH > lien mesuré > défaut conservateur 12 Go/s (gen3 x16 effectif)`. Terme de handoff du flux résiduel ajouté au modèle additif V0-C1 : hidden state fp32 × 2 traversées/token en CpuOffload (`-ngl`), × 2 traversées/**couche** en MoeOffload (`--n-cpu-moe`). Ordre de grandeur seconde (~0,1 % du temps token) mais fondé sur mesure au lieu de zéro implicite ; **terme nul si `hidden_size` absent** — jamais deviné. `EstimateBasis.pcie_bandwidth_gbps` exposé pour les modes splittés + ligne « Estimate Basis » CLI ; `plan.rs` hérite via sa délégation à `estimate_tps`.
+- **NVLink** : détection implémentée et testée ; le « bypass PCIe » s'appliquera en V2-e (TP multi-GPU). NVLink ne porte PAS les transferts hôte↔GPU (pas de bypass sur le handoff) — hypothèse commentée dans le code.
+- **Limitation documentée** (code + journal) : les runtimes qui streament les poids spillés par token (vLLM `--cpu-offload-gb`) exigeraient un terme PCIe bien plus gros que le handoff — non calibré ici, pas simulé silencieusement.
+- Tests : +11 (hardware : formule BW, parsers speed/width/nvidia-smi/topo NVLink, layout sysfs en temp-dir avec max>current, replis et états invalides ; fit : résolveur config>wins, handoff exact vs hand-calc, scaling en couches, skip sans métadonnées, exposition basis). Workspace : **723 verts** (baseline 712), 3 ignored réseau ; clippy profil **identique au baseline** (zéro nouveau warning) ; fmt OK.
+- **NEXT** : V2-b (fragmentation VRAM réaliste).
+
 ## 7. Pièges connus & références validées sur HEAD 3f44fd3
 
 | Fait | Référence | Attention |
@@ -231,6 +241,7 @@ Légère divergence avec le rapport initial : **le HEAD actuel contient déjà d
 | Shard GGUF = métadonnées globales + 1/M des tenseurs | gguf.rs `scaled_to_full_model` (V1-c) | ne jamais mélanger block_count global et octets d'un shard sans ×M |
 | YaRN/rope-scaling : zéro flag à générer | llama-model.cpp:1202 lit `{arch}.rope.scaling.*` du GGUF | émettre --rope-scaling/--yarn-orig-ctx serait redondant (extrapolation manuelle seulement) |
 | Calibrage rejette batch>1 | benchmarks.rs:452-464 | lever en V2-d |
+| Lien PCIe downtrainé au repos | V2-a, machine réelle : dGPU « 2.5 GT/s x8 » courant vs « 16 GT/s x16 » max | lire `max_link_*`/« Max » nvidia-smi en priorité ; `current_*` seul → BW_pcie ~10× sous-estimée |
 | Percentiles communautaires non exposés | fit.rs ~2714 (p10/median/p90) | base de V0-incertitude |
 | Tolerance tests perf existants | fit.rs ~3702 (±30 % Q4_K_M, ±50 % sinon) | garder cohérents |
 | Fallback silencieux 7B si métadonnées manquantes | cf rapport (majeure 14) | à signaler en output, jamais silencieux |
