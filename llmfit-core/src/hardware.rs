@@ -2268,6 +2268,22 @@ impl SystemSpecs {
         if let Some(bw) = measured_ram_bandwidth_gbps() {
             println!("RAM Bandwidth: ~{bw:.0} GB/s (measured)");
         }
+        // NUMA topology & GPU attachment (V2-c)
+        let nodes = numa_nodes();
+        if nodes.len() > 1 {
+            println!(
+                "NUMA: {} nodes ({})",
+                nodes.len(),
+                nodes
+                    .iter()
+                    .map(|n| format!("node{}={} CPUs", n.id, n.cpus))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            if let Some(gpu_node) = gpu_numa_node() {
+                println!("  GPU NUMA node: {gpu_node} (RAM sweep targeted there)");
+            }
+        }
         println!("Backend: {}", self.backend.label());
 
         if self.gpus.is_empty() {
@@ -2618,13 +2634,31 @@ fn read_proc_meminfo_total_gb() -> Option<f64> {
 }
 
 /// Effective system RAM bandwidth in GB/s, measured once per process with a
-/// short multithreaded memcpy sweep (~100 ms total) and cached.
+/// short multithreaded streaming sweep (~200 ms total) and cached.
 ///
-/// This is *achievable* streaming bandwidth (STREAM-copy convention: bytes
-/// read + bytes written per pass), which is what MoE-offload expert streaming
-/// actually sees — typically 60–80% of the spec-sheet peak. Returns `None`
-/// if the measurement fails or produces an implausible value; callers should
-/// fall back to a conservative constant.
+/// Methodology (V2-c, honest-bench rules):
+/// - Threads: the GPU-local NUMA node's CPU count when identifiable from
+///   sysfs, otherwise every core (`available_parallelism`, capped at 64).
+///   Eight threads rarely saturate a desktop's memory controllers; a 32-core
+///   workstation needs all of them.
+/// - Traffic is unambiguous: one pure-read pass (sum of u64 words, counted
+///   as reads) plus one pure-write pass (pattern fill, counted as writes).
+///   The old memcpy sweep left read-for-ownership ambiguity — a plain copy
+///   also reads the destination lines before writing them unless the libc
+///   uses non-temporal stores, so its byte accounting depended on libc
+///   internals.
+/// - The result is a *stream ceiling* (best-case linear access), the right
+///   roofline for MoE-offload expert streaming whose tensors are multi-MB
+///   contiguous runs. Scattered access will see less; this number is an
+///   upper bound by construction.
+///
+/// NUMA note: safe Rust exposes no CPU-affinity API and this crate forbids
+/// `unsafe`, so threads are NOT pinned. Sizing the pool to the GPU-local
+/// node makes co-location likely but is not guaranteed; on multi-node
+/// machines treat the sum as a system-wide figure.
+///
+/// Returns `None` if the measurement fails or produces an implausible value;
+/// callers should fall back to a conservative constant.
 pub fn measured_ram_bandwidth_gbps() -> Option<f64> {
     static MEASURED: std::sync::OnceLock<Option<f64>> = std::sync::OnceLock::new();
     *MEASURED.get_or_init(measure_ram_bandwidth_gbps)
@@ -2633,15 +2667,16 @@ pub fn measured_ram_bandwidth_gbps() -> Option<f64> {
 fn measure_ram_bandwidth_gbps() -> Option<f64> {
     use std::time::{Duration, Instant};
 
-    // Per-thread working set (2 × 32 MiB) must comfortably exceed L3 so we
-    // measure DRAM, not cache. A single thread rarely saturates multi-channel
-    // memory controllers, so spread the sweep across up to 8 cores.
-    const BUF_BYTES: usize = 32 * 1024 * 1024;
     const MEASURE_WINDOW: Duration = Duration::from_millis(80);
 
-    let threads = std::thread::available_parallelism()
-        .map(|n| n.get().min(8))
-        .unwrap_or(4);
+    // Thread pool: GPU-local NUMA node when identifiable, else every core.
+    let threads = ram_bench_thread_count();
+
+    // Per-thread working set must comfortably exceed L3 so we measure DRAM,
+    // not cache, while the TOTAL footprint stays at or below the 512 MiB the
+    // previous 8×32 MiB sweep used (small-VM safety).
+    let buf_bytes = ram_bench_buffer_bytes(threads);
+    let buf_words = buf_bytes / std::mem::size_of::<u64>();
 
     let barrier = std::sync::Barrier::new(threads);
     let per_thread_gbps: Vec<f64> = std::thread::scope(|scope| {
@@ -2649,21 +2684,49 @@ fn measure_ram_bandwidth_gbps() -> Option<f64> {
         let handles: Vec<_> = (0..threads)
             .map(|_| {
                 scope.spawn(move || {
-                    let src = vec![1u8; BUF_BYTES];
-                    let mut dst = vec![0u8; BUF_BYTES];
-                    // Warmup pass faults pages in before the timed window.
+                    let src = vec![0x0123_4567_89AB_CDEFu64; buf_words];
+                    let mut dst = vec![0u64; buf_words];
+                    // Warmup pass faults pages in before any timed window.
                     dst.copy_from_slice(&src);
-                    std::hint::black_box(&mut dst);
+                    std::hint::black_box(&dst);
                     barrier.wait();
+
+                    // Pure-read window: sum every word; black_box keeps the
+                    // accumulation observable so loads cannot be elided.
                     let start = Instant::now();
                     let mut passes = 0u64;
                     while start.elapsed() < MEASURE_WINDOW {
-                        dst.copy_from_slice(&src);
-                        std::hint::black_box(&mut dst);
+                        let acc: u64 = src.iter().copied().fold(0, u64::wrapping_add);
+                        std::hint::black_box(acc);
                         passes += 1;
                     }
-                    let secs = start.elapsed().as_secs_f64();
-                    (passes as f64) * (2 * BUF_BYTES) as f64 / secs / 1e9
+                    let read_gbps =
+                        (passes * buf_bytes as u64) as f64 / start.elapsed().as_secs_f64() / 1e9;
+
+                    barrier.wait();
+                    // Pure-write window: pattern fill counts destination
+                    // bytes once — no read-for-ownership ambiguity. A
+                    // strided checksum over the filled buffer keeps the
+                    // stores observable so the optimizer cannot elide the
+                    // pass.
+                    let start = Instant::now();
+                    let mut passes = 0u64;
+                    let stride = (buf_words / 64).max(1);
+                    while start.elapsed() < MEASURE_WINDOW {
+                        dst.fill(0xFEDC_BA98_7654_3210u64);
+                        let mut probe = 0u64;
+                        let mut i = 0;
+                        while i < buf_words {
+                            probe = probe.wrapping_add(dst[i]);
+                            i += stride;
+                        }
+                        std::hint::black_box(probe);
+                        passes += 1;
+                    }
+                    let write_gbps =
+                        (passes * buf_bytes as u64) as f64 / start.elapsed().as_secs_f64() / 1e9;
+
+                    read_gbps + write_gbps
                 })
             })
             .collect();
@@ -2674,9 +2737,43 @@ fn measure_ram_bandwidth_gbps() -> Option<f64> {
         return None;
     }
     let total: f64 = per_thread_gbps.iter().sum();
-    // Sanity band: below 2 GB/s means the measurement was starved (heavy
-    // contention, throttled VM); above 4000 GB/s means we measured cache.
-    (2.0..=4000.0).contains(&total).then_some(total)
+    plausible_ram_bandwidth(total).then_some(total)
+}
+
+/// Thread count for the RAM sweep: the CPU count of the NUMA node the
+/// primary discrete GPU hangs off when sysfs identifies one (expert
+/// streaming lands on that node's controllers), otherwise all cores.
+/// Capped at 64 to bound runtime and footprint on exotic machines.
+fn ram_bench_thread_count() -> usize {
+    let from_gpu_node = gpu_numa_node()
+        .and_then(|id| numa_nodes().into_iter().find(|n| n.id == id))
+        .map(|n| n.cpus as usize)
+        .filter(|&c| c > 0);
+    from_gpu_node
+        .unwrap_or_else(|| {
+            std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(4)
+        })
+        .min(64)
+}
+
+/// Per-thread buffer size for `threads` workers: keep the aggregate working
+/// set between 64 MiB and 512 MiB. At the old default of 8 threads this is
+/// exactly the historical 2 × 32 MiB per thread.
+fn ram_bench_buffer_bytes(threads: usize) -> usize {
+    const MIN_TOTAL: usize = 64 * 1024 * 1024;
+    const MAX_TOTAL: usize = 512 * 1024 * 1024;
+    let threads = threads.max(1);
+    let total = (threads * 2 * 32 * 1024 * 1024).clamp(MIN_TOTAL, MAX_TOTAL);
+    (total / (2 * threads)).next_multiple_of(4096)
+}
+
+/// Sanity band for the aggregated sweep: below 2 GB/s means the measurement
+/// was starved (heavy contention, throttled VM); above 4000 GB/s means we
+/// measured cache rather than DRAM.
+fn plausible_ram_bandwidth(gbps: f64) -> bool {
+    (2.0..=4000.0).contains(&gbps)
 }
 
 /// Estimate GPU memory bandwidth in GB/s from the GPU model name.
@@ -3143,6 +3240,105 @@ fn amdgpu_sysfs_vram_used_from(dir: &std::path::Path) -> Option<f64> {
         let gb = bytes as f64 / 1_073_741_824.0;
         if (0.0..=512.0).contains(&gb) && gb > 0.0 {
             return Some(gb);
+        }
+    }
+    None
+}
+
+/// One NUMA node as reported by Linux sysfs (V2-c).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NumaNode {
+    pub id: u32,
+    /// Number of logical CPUs in the node's `cpulist` (e.g. `"0-7,16-23"`).
+    pub cpus: u32,
+}
+
+/// All online NUMA nodes under `/sys/devices/system/node`. Empty on
+/// non-Linux systems, single-node machines without the sysfs layout, or any
+/// read failure — callers must treat that as "topology unknown".
+pub fn numa_nodes() -> Vec<NumaNode> {
+    if !cfg!(target_os = "linux") {
+        return Vec::new();
+    }
+    numa_nodes_from(std::path::Path::new("/sys/devices/system/node"))
+}
+
+fn numa_nodes_from(dir: &std::path::Path) -> Vec<NumaNode> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut nodes: Vec<NumaNode> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            let id: u32 = name.strip_prefix("node")?.parse().ok()?;
+            let raw = std::fs::read_to_string(entry.path().join("cpulist")).ok()?;
+            Some(NumaNode {
+                id,
+                cpus: parse_cpulist(&raw)?,
+            })
+        })
+        .collect();
+    nodes.sort_by_key(|n| n.id);
+    nodes
+}
+
+/// Count the CPUs in a kernel cpulist: comma-separated ranges `A-B` and
+/// single indices. Malformed segments are skipped; an unparsable list is
+/// `None` so callers can distinguish "no CPUs" from "unreadable".
+fn parse_cpulist(raw: &str) -> Option<u32> {
+    let mut total = 0u32;
+    for part in raw.trim().split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        match part.split_once('-') {
+            Some((lo, hi)) => {
+                let lo: u32 = lo.trim().parse().ok()?;
+                let hi: u32 = hi.trim().parse().ok()?;
+                if hi < lo {
+                    return None;
+                }
+                total += hi - lo + 1;
+            }
+            None => {
+                part.parse::<u32>().ok()?;
+                total += 1;
+            }
+        }
+    }
+    (total > 0).then_some(total)
+}
+
+/// NUMA node of the primary discrete GPU: the first display-class PCI device
+/// reporting a non-negative `numa_node` (`-1` means "not attached", typical
+/// of single-socket desktops). This is where MoE-offload streaming should be
+/// measured — expert tensors land in the node's DRAM.
+pub fn gpu_numa_node() -> Option<u32> {
+    if !cfg!(target_os = "linux") {
+        return None;
+    }
+    gpu_numa_node_from(std::path::Path::new("/sys/bus/pci/devices"))
+}
+
+fn gpu_numa_node_from(dir: &std::path::Path) -> Option<u32> {
+    let entries = std::fs::read_dir(dir).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(class) = std::fs::read_to_string(path.join("class")) else {
+            continue;
+        };
+        if !is_display_controller_class(&class) {
+            continue;
+        }
+        let Ok(raw) = std::fs::read_to_string(path.join("numa_node")) else {
+            continue;
+        };
+        match raw.trim().parse::<i32>() {
+            Ok(node) if node >= 0 => return Some(node as u32),
+            _ => continue,
         }
     }
     None
@@ -5880,5 +6076,98 @@ GPU[2]\t\t: GFX Version: \t\tgfx90c
             super::amdgpu_sysfs_vram_used_from(std::path::Path::new("/nonexistent/llmfit")),
             None
         );
+    }
+
+    // NUMA topology parsing (V2-c)
+    #[test]
+    fn test_parse_cpulist() {
+        assert_eq!(super::parse_cpulist("0-7"), Some(8));
+        assert_eq!(super::parse_cpulist("0-7,16-23"), Some(16));
+        assert_eq!(super::parse_cpulist("5"), Some(1));
+        assert_eq!(super::parse_cpulist("0-3,8"), Some(5));
+        assert_eq!(super::parse_cpulist(""), None);
+        assert_eq!(super::parse_cpulist("x-y"), None);
+        assert_eq!(super::parse_cpulist("10-5"), None);
+    }
+
+    #[test]
+    fn test_numa_nodes_from_tempdir() {
+        let root = std::env::temp_dir().join(format!("llmfit-numa-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let node0 = root.join("node0");
+        std::fs::create_dir_all(&node0).unwrap();
+        std::fs::write(node0.join("cpulist"), "0-7\n").unwrap();
+        let node1 = root.join("node1");
+        std::fs::create_dir_all(&node1).unwrap();
+        std::fs::write(node1.join("cpulist"), "8-15\n").unwrap();
+        let node2 = root.join("node2");
+        std::fs::create_dir_all(&node2).unwrap();
+        std::fs::write(node2.join("cpulist"), "16-23,32-39\n").unwrap();
+        let bogus = root.join("not-a-node");
+        std::fs::create_dir_all(&bogus).unwrap();
+
+        let nodes = super::numa_nodes_from(&root);
+        assert_eq!(nodes.len(), 3);
+        assert_eq!(nodes[0].id, 0);
+        assert_eq!(nodes[0].cpus, 8);
+        assert_eq!(nodes[1].id, 1);
+        assert_eq!(nodes[1].cpus, 8);
+        assert_eq!(nodes[2].id, 2);
+        assert_eq!(nodes[2].cpus, 16);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_gpu_numa_node_from_tempdir() {
+        let root =
+            std::env::temp_dir().join(format!("llmfit-gpu-numa-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        // Non-display device ignored
+        let nic = root.join("0000:01:00.0");
+        std::fs::create_dir_all(&nic).unwrap();
+        std::fs::write(nic.join("class"), "0x020000\n").unwrap();
+        std::fs::write(nic.join("numa_node"), "0\n").unwrap();
+        // Display device with -1 skipped
+        let igpu = root.join("0000:00:02.0");
+        std::fs::create_dir_all(&igpu).unwrap();
+        std::fs::write(igpu.join("class"), "0x030000\n").unwrap();
+        std::fs::write(igpu.join("numa_node"), "-1\n").unwrap();
+        // Target display device with valid node
+        let dgpu = root.join("0000:03:00.0");
+        std::fs::create_dir_all(&dgpu).unwrap();
+        std::fs::write(dgpu.join("class"), "0x030000\n").unwrap();
+        std::fs::write(dgpu.join("numa_node"), "1\n").unwrap();
+
+        assert_eq!(super::gpu_numa_node_from(&root), Some(1));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_ram_bench_buffer_sizing() {
+        // 1 thread -> 32 MiB each (min total 64 MiB / 2)
+        assert_eq!(super::ram_bench_buffer_bytes(1), 32 * 1024 * 1024);
+        // 8 threads -> 32 MiB each (historical 8 x 32 MiB)
+        assert_eq!(super::ram_bench_buffer_bytes(8), 32 * 1024 * 1024);
+        // 64 threads -> 4 MiB each (total capped at 512 MiB)
+        assert_eq!(super::ram_bench_buffer_bytes(64), 4 * 1024 * 1024);
+        // 128 threads -> 2 MiB each (total still 512 MiB)
+        assert_eq!(super::ram_bench_buffer_bytes(128), 2 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_plausible_ram_bandwidth() {
+        assert!(!super::plausible_ram_bandwidth(1.0));
+        assert!(super::plausible_ram_bandwidth(10.0));
+        assert!(super::plausible_ram_bandwidth(400.0));
+        assert!(!super::plausible_ram_bandwidth(5000.0));
+    }
+
+    #[test]
+    fn test_ram_bench_thread_count_no_panic() {
+        // Just ensure it returns something reasonable without panicking.
+        let t = super::ram_bench_thread_count();
+        assert!((1..=64).contains(&t));
     }
 }
