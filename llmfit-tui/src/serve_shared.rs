@@ -168,6 +168,7 @@ mod tests {
             gpu_vram_gb: Some(16.0),
             total_gpu_vram_gb: Some(16.0),
             gpu_available_gb: None,
+            measured_vram_in_use_gb: None,
             gpu_name: Some(name.to_string()),
             gpu_count: 1,
             unified_memory: false,

@@ -57,6 +57,13 @@ pub struct SystemSpecs {
     /// query is unavailable. Distinct from `gpu_vram_gb`, which for unified
     /// memory reports the *total* pool.
     pub gpu_available_gb: Option<f64>,
+    /// VRAM reported as used on the primary discrete GPU at detection time
+    /// (desktop, compositor, other apps). Populated only by real hardware
+    /// detection — synthetic systems built from CLI overrides or tests carry
+    /// `None`, keeping estimates deterministic. Fit analysis treats this as
+    /// the environment part of the VRAM reserve (V2-b): already-occupied
+    /// memory must not be counted as free capacity.
+    pub measured_vram_in_use_gb: Option<f64>,
     pub gpu_name: Option<String>,
     pub gpu_count: u32,
     pub unified_memory: bool,
@@ -137,6 +144,16 @@ impl SystemSpecs {
             None
         };
 
+        // Environment VRAM usage (desktop, compositor, other apps) is read
+        // once here; fit analysis treats it as unavailable for inference.
+        // Skipped on unified-memory systems: the pool is shared RAM and the
+        // macOS wired limit already nets OS usage out.
+        let measured_vram_in_use_gb = if has_gpu && !unified_memory {
+            measured_vram_in_use_gb()
+        } else {
+            None
+        };
+
         SystemSpecs {
             total_ram_gb,
             available_ram_gb,
@@ -153,6 +170,7 @@ impl SystemSpecs {
             gpus,
             cluster_mode: false,
             cluster_node_count: 0,
+            measured_vram_in_use_gb,
         }
     }
 
@@ -3065,6 +3083,71 @@ fn is_display_controller_class(class: &str) -> bool {
     class.trim().to_ascii_lowercase().starts_with("0x03")
 }
 
+/// VRAM currently in use on a discrete GPU, in GB, cached per process (V2-b).
+///
+/// Reads NVML through `nvidia-smi --query-gpu=memory.used`, falling back to
+/// the amdgpu sysfs counter. Returns `None` when nothing reports. This is
+/// the environment part of realistic VRAM accounting: a desktop session,
+/// compositor or open browser holds VRAM that no inference runtime can
+/// allocate, so counting it as free would overstate capacity. The value is
+/// stamped onto `SystemSpecs` by [`SystemSpecs::detect`] only — synthetic
+/// systems (CLI overrides, tests) stay deterministic with `None`.
+pub fn measured_vram_in_use_gb() -> Option<f64> {
+    static USED: std::sync::OnceLock<Option<f64>> = std::sync::OnceLock::new();
+    *USED.get_or_init(|| nvidia_smi_vram_used_gb().or_else(amdgpu_sysfs_vram_used_gb))
+}
+
+fn nvidia_smi_vram_used_gb() -> Option<f64> {
+    let out = std::process::Command::new("nvidia-smi")
+        .args(["--query-gpu=memory.used", "--format=csv,noheader,nounits"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    parse_nvidia_smi_memory_used(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// First line of `nvidia-smi --query-gpu=memory.used` CSV output: one GPU
+/// per line, primary first, reported in MiB without units.
+fn parse_nvidia_smi_memory_used(output: &str) -> Option<f64> {
+    let line = output.lines().next()?.trim();
+    let mib: f64 = line.parse().ok()?;
+    let gb = mib / 1024.0;
+    // Sanity band: real GPUs report between 0 and at most a few hundred GB.
+    (0.0..=512.0).contains(&gb).then_some(gb)
+}
+
+/// amdgpu publishes per-device used VRAM as bytes in `mem_info_vram_used`
+/// under each DRM device's PCI directory (same file family as the
+/// `mem_info_vram_total` probe used during detection). NVIDIA sysfs does not
+/// expose used VRAM. First match wins on multi-GPU systems; this is a
+/// best-effort fallback when nvidia-smi is unavailable.
+fn amdgpu_sysfs_vram_used_gb() -> Option<f64> {
+    if !cfg!(target_os = "linux") {
+        return None;
+    }
+    let dir = std::path::Path::new("/sys/bus/pci/devices");
+    amdgpu_sysfs_vram_used_from(dir)
+}
+
+fn amdgpu_sysfs_vram_used_from(dir: &std::path::Path) -> Option<f64> {
+    let entries = std::fs::read_dir(dir).ok()?;
+    for entry in entries.flatten() {
+        let Ok(raw) = std::fs::read_to_string(entry.path().join("mem_info_vram_used")) else {
+            continue;
+        };
+        let Ok(bytes) = raw.trim().parse::<u64>() else {
+            continue;
+        };
+        let gb = bytes as f64 / 1_073_741_824.0;
+        if (0.0..=512.0).contains(&gb) && gb > 0.0 {
+            return Some(gb);
+        }
+    }
+    None
+}
+
 /// Read the PCIe link from one PCI device directory (Linux sysfs).
 ///
 /// Prefers the reported maximum link (`max_link_speed`/`max_link_width`) over
@@ -4266,6 +4349,7 @@ GPU id = 1 (NVIDIA GeForce RTX 4090)
             gpu_vram_gb: None,
             total_gpu_vram_gb: None,
             gpu_available_gb: None,
+            measured_vram_in_use_gb: None,
             gpu_name: None,
             gpu_count: 0,
             unified_memory: false,
@@ -4286,6 +4370,7 @@ GPU id = 1 (NVIDIA GeForce RTX 4090)
             gpu_vram_gb: Some(8.0),
             total_gpu_vram_gb: Some(8.0),
             gpu_available_gb: None,
+            measured_vram_in_use_gb: None,
             gpu_name: Some("NVIDIA RTX 3070".to_string()),
             gpu_count: 1,
             unified_memory: false,
@@ -4856,6 +4941,7 @@ GPU id = 1 (NVIDIA GeForce RTX 4090)
             gpu_vram_gb: Some(16.0),
             total_gpu_vram_gb: Some(16.0),
             gpu_available_gb: None,
+            measured_vram_in_use_gb: None,
             gpu_name: Some("Test GPU".to_string()),
             gpu_count: 1,
             unified_memory: false,
@@ -4890,6 +4976,7 @@ GPU id = 1 (NVIDIA GeForce RTX 4090)
             gpu_vram_gb: Some(36.0),
             total_gpu_vram_gb: Some(36.0),
             gpu_available_gb: Some(27.0),
+            measured_vram_in_use_gb: None,
             gpu_name: Some("Apple M2 Max".to_string()),
             gpu_count: 1,
             unified_memory: true,
@@ -4924,6 +5011,7 @@ GPU id = 1 (NVIDIA GeForce RTX 4090)
             gpu_vram_gb: None,
             total_gpu_vram_gb: None,
             gpu_available_gb: None,
+            measured_vram_in_use_gb: None,
             gpu_name: None,
             gpu_count: 0,
             unified_memory: false,
@@ -5729,5 +5817,68 @@ GPU[2]\t\t: GFX Version: \t\tgfx90c
     #[cfg(not(target_os = "windows"))]
     fn test_registry_vram_query_returns_empty_off_windows() {
         assert!(super::detect_windows_registry_vram().is_empty());
+    }
+
+    // nvidia-smi reports one GPU per line in MiB without units; the primary
+    // GPU comes first and is the only one consulted.
+    #[test]
+    fn test_parse_nvidia_smi_memory_used() {
+        assert!(
+            (super::parse_nvidia_smi_memory_used("1234\n").unwrap() - 1234.0 / 1024.0).abs() < 1e-9
+        );
+        assert_eq!(super::parse_nvidia_smi_memory_used("0\n"), Some(0.0));
+        // Multi-GPU output: first line wins.
+        assert!(super::parse_nvidia_smi_memory_used("100\n200\n").unwrap() < 0.2);
+        // Garbage, empty output and out-of-band values are rejected rather
+        // than trusted.
+        assert_eq!(super::parse_nvidia_smi_memory_used("no units here\n"), None);
+        assert_eq!(super::parse_nvidia_smi_memory_used(""), None);
+        assert_eq!(super::parse_nvidia_smi_memory_used("600000\n"), None);
+        assert_eq!(super::parse_nvidia_smi_memory_used("-5\n"), None);
+    }
+
+    // The amdgpu scan must skip devices that do not publish the counter
+    // (everything non-amdgpu) and out-of-band readings, then accept the first
+    // plausible one.
+    #[test]
+    fn test_amdgpu_sysfs_vram_used_scan() {
+        let root =
+            std::env::temp_dir().join(format!("llmfit-vram-used-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let missing = root.join("0000:01:00.0");
+        std::fs::create_dir_all(&missing).unwrap();
+        let garbage = root.join("0000:02:00.0");
+        std::fs::create_dir_all(&garbage).unwrap();
+        std::fs::write(garbage.join("mem_info_vram_used"), "not-a-number\n").unwrap();
+        let huge = root.join("0000:03:00.0");
+        std::fs::create_dir_all(&huge).unwrap();
+        std::fs::write(
+            huge.join("mem_info_vram_used"),
+            format!("{}", 600u64 * 1024 * 1024 * 1024),
+        )
+        .unwrap();
+        let real = root.join("0000:04:00.0");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::write(
+            real.join("mem_info_vram_used"),
+            format!("{}", 3u64 * 1024 * 1024 * 1024),
+        )
+        .unwrap();
+
+        assert!(
+            (super::amdgpu_sysfs_vram_used_from(&root).unwrap() - 3.0).abs() < 1e-9,
+            "first plausible device wins; junk and out-of-band skipped"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // Empty sysfs trees report nothing instead of failing.
+    #[test]
+    fn test_amdgpu_sysfs_vram_used_missing_root() {
+        assert_eq!(
+            super::amdgpu_sysfs_vram_used_from(std::path::Path::new("/nonexistent/llmfit")),
+            None
+        );
     }
 }

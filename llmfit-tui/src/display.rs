@@ -650,6 +650,12 @@ fn display_estimate_basis(fit: &ModelFit) {
             );
         }
     }
+    if let Some(env) = basis.vram_environment_reserve_gb {
+        println!(
+            "  VRAM budget: {:.1} GB already used by desktop/display held back, plus a max(10%, 2 GiB) fragmentation floor",
+            env
+        );
+    }
     println!(
         "  Models single-request generation at ctx <= {} tokens; prompt processing",
         basis.assumed_context

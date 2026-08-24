@@ -372,10 +372,18 @@ fn evaluate_current(
     system: &SystemSpecs,
     config: &CalcConfig,
 ) -> PlanCurrentStatus {
-    let model_mem = model.estimate_memory_gb_with_kv(quant, context, kv_quant);
+    let model_mem = model.estimate_memory_gb_with_reserve(
+        quant,
+        context,
+        kv_quant,
+        config.allocator_cache_fraction,
+    );
+    // Same V2-b effective pool as fit analysis: desktop/display usage and the
+    // fragmentation floor are held back before scoring headroom.
     let gpu_vram = system
         .total_gpu_vram_gb
         .or(system.gpu_vram_gb)
+        .map(|raw| crate::fit::vram_reserve_components(raw, system, config).0)
         .unwrap_or(0.0);
 
     let mut candidates: Vec<(FitLevel, PlanRunPath, f64)> = Vec::new();
@@ -533,7 +541,12 @@ fn build_path_estimate(
     system: &SystemSpecs,
     config: &CalcConfig,
 ) -> PathEstimate {
-    let model_mem = model.estimate_memory_gb_with_kv(quant, context, kv_quant);
+    let model_mem = model.estimate_memory_gb_with_reserve(
+        quant,
+        context,
+        kv_quant,
+        config.allocator_cache_fraction,
+    );
     let backend = default_gpu_backend(system);
     let mut notes = vec![];
 
@@ -566,9 +579,11 @@ fn build_path_estimate(
             let tps =
                 estimate_tps_with_gpu(model, quant, backend, path, min_cores, Some(system), config);
 
+            // V2-b: score against the effective pool, not the nameplate sum.
             let available_vram = system
                 .total_gpu_vram_gb
                 .or(system.gpu_vram_gb)
+                .map(|raw| crate::fit::vram_reserve_components(raw, system, config).0)
                 .unwrap_or(0.0);
             let fit = fit_level_for(path, min_vram, available_vram, rec_vram);
             notes.push(
@@ -1127,6 +1142,7 @@ mod tests {
             gpu_vram_gb: Some(12.0),
             total_gpu_vram_gb: Some(12.0),
             gpu_available_gb: None,
+            measured_vram_in_use_gb: None,
             gpu_name: Some("Test GPU".to_string()),
             gpu_count: 1,
             unified_memory: false,

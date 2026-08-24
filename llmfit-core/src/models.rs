@@ -10,6 +10,19 @@ pub const MLX_QUANT_HIERARCHY: &[&str] = &["mlx-8bit", "mlx-4bit"];
 /// ONNX catalog quantization hierarchy (best quality to most compressed).
 pub const ONNX_QUANT_HIERARCHY: &[&str] = &["Q8_0", "Q4_0"];
 
+/// CUDA/Metal context, command queues and kernel workspaces held by the
+/// inference process regardless of model size or context length. Observed
+/// band on real systems: 300–500 MB; the midpoint is kept deliberately.
+pub const RUNTIME_CONTEXT_RESERVE_GB: f64 = 0.4;
+
+/// Default share of the working set re-held by allocator caching (PyTorch
+/// caching allocator, llama.cpp KV-shift buffers). Observed band 5–15 %;
+/// overridable via `CalcConfig::allocator_cache_fraction`.
+pub const DEFAULT_ALLOCATOR_CACHE_FRACTION: f64 = 0.10;
+
+/// GiB in bytes, used to convert element counts into GB.
+const GIB: f64 = 1_073_741_824.0;
+
 /// Bytes per parameter for each quantization level.
 pub fn quant_bpp(quant: &str) -> f64 {
     match quant {
@@ -893,15 +906,64 @@ impl LlmModel {
     }
 
     /// Estimate memory required (GB) with an explicit KV cache quantization.
-    /// Formula: model_weights + KV_cache + runtime_overhead
+    /// Formula: model_weights + KV_cache + runtime_reserve
+    ///
+    /// The runtime reserve replaces the historical flat 0.5 GB with a
+    /// context-aware decomposition: CUDA/Metal context, activation buffers
+    /// that grow with the context window, and allocator caching. See
+    /// [`LlmModel::runtime_reserve_gb`].
     pub fn estimate_memory_gb_with_kv(&self, quant: &str, ctx: u32, kv: KvQuant) -> f64 {
+        self.estimate_memory_gb_with_reserve(quant, ctx, kv, DEFAULT_ALLOCATOR_CACHE_FRACTION)
+    }
+
+    /// Same as [`estimate_memory_gb_with_kv`] with a caller-supplied
+    /// allocator-cache fraction (observed band 5–15 %; see
+    /// [`DEFAULT_ALLOCATOR_CACHE_FRACTION`]). Values are clamped to [0, 1].
+    pub fn estimate_memory_gb_with_reserve(
+        &self,
+        quant: &str,
+        ctx: u32,
+        kv: KvQuant,
+        allocator_cache_fraction: f64,
+    ) -> f64 {
         let bpp = quant_bpp(quant);
         let params = self.params_b();
         let model_mem = params * bpp;
         let kv_cache = self.kv_cache_gb(ctx, kv);
-        // Runtime overhead (CUDA/Metal context, buffers)
-        let overhead = 0.5;
-        model_mem + kv_cache + overhead
+        let working_set = model_mem + kv_cache;
+        model_mem + kv_cache + self.runtime_reserve_gb(ctx, working_set, allocator_cache_fraction)
+    }
+
+    /// Runtime reserve in GB held on top of weights + KV cache (V2-b).
+    ///
+    /// Components:
+    /// - CUDA/Metal context: [`RUNTIME_CONTEXT_RESERVE_GB`], independent of
+    ///   model size and context length.
+    /// - Activations: a couple of full-width fp32 intermediates live during
+    ///   each decode step, so this grows linearly with the context window.
+    /// - Allocator caching: runtimes re-retain freed blocks proportional to
+    ///   the working set (`fraction` of weights + KV + activations + ctx).
+    pub fn runtime_reserve_gb(
+        &self,
+        ctx: u32,
+        working_set_gb: f64,
+        allocator_cache_fraction: f64,
+    ) -> f64 {
+        let activations = self.activation_memory_gb(ctx);
+        RUNTIME_CONTEXT_RESERVE_GB
+            + activations
+            + allocator_cache_fraction.clamp(0.0, 1.0)
+                * (working_set_gb + RUNTIME_CONTEXT_RESERVE_GB + activations)
+    }
+
+    /// Activation / compute-buffer memory in GB for one decode step at the
+    /// given context (batch 1). Roofline: two full-width fp32 buffers live
+    /// simultaneously (residual stream plus the widest attention/MLP
+    /// temporary). Catalog entries without `hidden_size` assume the dominant
+    /// 4 096 width rather than guessing a per-model value.
+    pub fn activation_memory_gb(&self, ctx: u32) -> f64 {
+        let hidden = f64::from(self.hidden_size.unwrap_or(4096));
+        f64::from(ctx.max(1)) * hidden * 2.0 * 4.0 / GIB
     }
 
     /// KV cache size in GB at the given context length and KV quant.
@@ -1001,9 +1063,32 @@ impl LlmModel {
         ctx: u32,
         hierarchy: &[&'static str],
     ) -> Option<(&'static str, f64)> {
+        self.best_quant_for_budget_with_reserve(
+            budget_gb,
+            ctx,
+            hierarchy,
+            DEFAULT_ALLOCATOR_CACHE_FRACTION,
+        )
+    }
+
+    /// Same as [`best_quant_for_budget_with`] with a caller-supplied
+    /// allocator-cache fraction so candidate footprints match what the
+    /// caller will report for the chosen quant.
+    pub fn best_quant_for_budget_with_reserve(
+        &self,
+        budget_gb: f64,
+        ctx: u32,
+        hierarchy: &[&'static str],
+        allocator_cache_fraction: f64,
+    ) -> Option<(&'static str, f64)> {
         // Try best quality first
         for &q in hierarchy {
-            let mem = self.estimate_memory_gb(q, ctx);
+            let mem = self.estimate_memory_gb_with_reserve(
+                q,
+                ctx,
+                KvQuant::Fp16,
+                allocator_cache_fraction,
+            );
             if mem <= budget_gb {
                 return Some((q, mem));
             }
@@ -1012,7 +1097,12 @@ impl LlmModel {
         let half_ctx = ctx / 2;
         if half_ctx >= 1024 {
             for &q in hierarchy {
-                let mem = self.estimate_memory_gb(q, half_ctx);
+                let mem = self.estimate_memory_gb_with_reserve(
+                    q,
+                    half_ctx,
+                    KvQuant::Fp16,
+                    allocator_cache_fraction,
+                );
                 if mem <= budget_gb {
                     return Some((q, mem));
                 }
@@ -2350,13 +2440,107 @@ mod tests {
         };
 
         let mem = model.estimate_memory_gb("Q4_K_M", 4096);
-        // 7B params * 0.58 bytes = 4.06 GB + KV cache + overhead
+        // 7B params * 0.58 bytes = 4.06 GB + KV cache + runtime reserve
         assert!(mem > 4.0);
         assert!(mem < 6.0);
 
         // Q8_0 should require more memory
         let mem_q8 = model.estimate_memory_gb("Q8_0", 4096);
         assert!(mem_q8 > mem);
+    }
+
+    /// 7B dense model without architecture metadata — the common catalog
+    /// shape, exercising the hidden-size fallback in the activation term.
+    fn reserve_test_model() -> LlmModel {
+        LlmModel {
+            name: "Reserve Test".to_string(),
+            provider: "Test".to_string(),
+            parameter_count: "7B".to_string(),
+            parameters_raw: Some(7_000_000_000),
+            min_ram_gb: 4.0,
+            recommended_ram_gb: 8.0,
+            min_vram_gb: Some(4.0),
+            quantization: "Q4_K_M".to_string(),
+            context_length: 8192,
+            use_case: "General".to_string(),
+            is_moe: false,
+            num_experts: None,
+            active_experts: None,
+            active_parameters: None,
+            release_date: None,
+            gguf_sources: vec![],
+            capabilities: vec![],
+            languages: vec![],
+            format: ModelFormat::default(),
+            num_attention_heads: None,
+            num_key_value_heads: None,
+            num_hidden_layers: None,
+            head_dim: None,
+            kv_lora_rank: None,
+            qk_rope_head_dim: None,
+            attention_layout: None,
+            hidden_size: None,
+            moe_intermediate_size: None,
+            vocab_size: None,
+            shared_expert_intermediate_size: None,
+            architecture: None,
+            license: None,
+            sliding_window: None,
+            rope_scaling_type: None,
+            rope_scaling_factor: None,
+            rope_original_context_length: None,
+        }
+    }
+
+    #[test]
+    fn test_activation_memory_scales_with_context() {
+        let mut model = reserve_test_model();
+        // Without hidden_size metadata the dominant 4 096 width is assumed:
+        // ctx × 4096 × 2 fp32 buffers → 0.125 GB per 4 096 tokens.
+        assert!((model.activation_memory_gb(4096) - 0.125).abs() < 1e-9);
+        assert!((model.activation_memory_gb(8192) - 0.25).abs() < 1e-9);
+        // Zero context still reserves one step's worth of buffers.
+        assert!(model.activation_memory_gb(0) > 0.0);
+
+        // With explicit metadata the real width drives the term.
+        model.hidden_size = Some(2048);
+        assert!((model.activation_memory_gb(4096) - 0.0625).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_runtime_reserve_decomposition_and_clamp() {
+        let model = reserve_test_model();
+        let working_set = 5.0;
+        let activations = model.activation_memory_gb(4096);
+
+        // Algebraic identity: raising the fraction by Δ adds exactly
+        // Δ × (working set + ctx + activations).
+        let low = model.runtime_reserve_gb(4096, working_set, 0.05);
+        let high = model.runtime_reserve_gb(4096, working_set, 0.15);
+        assert!(
+            (high - low - 0.10 * (working_set + RUNTIME_CONTEXT_RESERVE_GB + activations)).abs()
+                < 1e-9
+        );
+
+        // Fraction is clamped to [0, 1]: negatives behave like zero.
+        let clamped = model.runtime_reserve_gb(4096, working_set, -3.0);
+        assert!((clamped - model.runtime_reserve_gb(4096, working_set, 0.0)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_estimate_memory_reserve_fraction_is_exact_surcharge() {
+        let model = reserve_test_model();
+        let base = model.estimate_memory_gb_with_reserve("Q4_K_M", 4096, KvQuant::Fp16, 0.0);
+        let with_default = model.estimate_memory_gb_with_kv("Q4_K_M", 4096, KvQuant::Fp16);
+        let weights = 7.0 * quant_bpp("Q4_K_M");
+        let kv = model.kv_cache_gb(4096, KvQuant::Fp16);
+        let delta = with_default - base;
+        let expected = crate::models::DEFAULT_ALLOCATOR_CACHE_FRACTION
+            * (weights + kv + RUNTIME_CONTEXT_RESERVE_GB + model.activation_memory_gb(4096));
+        assert!(
+            (delta - expected).abs() < 1e-9,
+            "delta={delta} expected={expected}"
+        );
     }
 
     #[test]

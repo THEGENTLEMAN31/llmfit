@@ -40,6 +40,20 @@ pub struct CalcConfig {
     /// conservative 12 GB/s (Gen3 x16 effective).
     #[serde(default)]
     pub pcie_bandwidth_gbps: Option<f64>,
+    /// Allocator-caching share of the working set held back in every memory
+    /// estimate (V2-b). Runtimes re-retain freed blocks proportional to what
+    /// they allocated; observed band 5–15 %, default 10 %. Clamped to [0, 1]
+    /// where it is applied.
+    #[serde(default = "default_allocator_cache_fraction")]
+    pub allocator_cache_fraction: f64,
+    /// Fixed environment VRAM reserve in GB — desktop/compositor/display
+    /// memory no inference runtime can allocate (V2-b). When None:
+    /// LLMFIT_VRAM_DISPLAY_RESERVE env var if set, otherwise the VRAM in use
+    /// measured at detection time (`SystemSpecs::measured_vram_in_use_gb`),
+    /// otherwise an OS heuristic (Windows/DWM 0.75 GB, other platforms
+    /// 0.25 GB).
+    #[serde(default)]
+    pub vram_display_reserve_gb: Option<f64>,
 }
 
 impl Default for CalcConfig {
@@ -51,12 +65,18 @@ impl Default for CalcConfig {
             scoring_weights: ScoringWeights::default(),
             ddr_bandwidth_gbps: None,
             pcie_bandwidth_gbps: None,
+            allocator_cache_fraction: default_allocator_cache_fraction(),
+            vram_display_reserve_gb: None,
         }
     }
 }
 
 fn default_efficiency() -> f64 {
     0.55
+}
+
+fn default_allocator_cache_fraction() -> f64 {
+    crate::models::DEFAULT_ALLOCATOR_CACHE_FRACTION
 }
 
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
@@ -233,6 +253,13 @@ pub struct EstimateBasis {
     /// (CpuOffload, MoeOffload).
     #[serde(default)]
     pub pcie_bandwidth_gbps: Option<f64>,
+    /// Environment VRAM reserve applied to the discrete-VRAM pool (GB) —
+    /// desktop/compositor/display memory measured at detection time or the
+    /// OS heuristic. `None` on unified memory or when no VRAM pool exists.
+    /// The fragmentation floor is not recorded here: it is pure policy,
+    /// `max(VRAM_FLOOR_FRACTION × pool, VRAM_FLOOR_MIN_GB)`.
+    #[serde(default)]
+    pub vram_environment_reserve_gb: Option<f64>,
     /// Efficiency factor applied to raw bandwidth (default 0.55).
     pub efficiency: f64,
     /// The estimate models single-request *generation* throughput at this
@@ -399,13 +426,35 @@ impl ModelFit {
 
         let min_vram = model.min_vram_gb.unwrap_or(model.min_ram_gb);
         let use_case = UseCase::from_model(model);
-        let default_mem_required =
-            model.estimate_memory_gb(model.quantization.as_str(), estimation_ctx);
+        let allocator_cache_fraction = config.allocator_cache_fraction;
+        let default_mem_required = model.estimate_memory_gb_with_reserve(
+            model.quantization.as_str(),
+            estimation_ctx,
+            KvQuant::Fp16,
+            allocator_cache_fraction,
+        );
         if estimation_ctx < model.context_length {
             notes.push(format!(
                 "Context capped at {} tokens for estimation (model supports up to {}; use --max-context to override)",
                 estimation_ctx, model.context_length
             ));
+        }
+
+        // V2-b transparency: state the VRAM held back for desktop use and
+        // fragmentation so the adjusted pool is auditable next to the raw
+        // nvidia-smi total.
+        if let Some(raw) = system.total_gpu_vram_gb
+            && !system.unified_memory
+        {
+            let (_, env, floor) = vram_reserve_components(raw, system, &config);
+            if env + floor > 0.05 {
+                notes.push(format!(
+                    "VRAM reserve: {:.1} GB held back ({:.1} GB display/desktop + {:.1} GB fragmentation floor)",
+                    env + floor,
+                    env,
+                    floor
+                ));
+            }
         }
 
         if model.requires_specialized_runtime() {
@@ -461,15 +510,23 @@ impl ModelFit {
         } else {
             InferenceRuntime::LlamaCpp
         };
-        let choose_quant =
-            |budget: f64| best_quant_for_runtime_budget(model, runtime, budget, estimation_ctx);
+        let choose_quant = |budget: f64| {
+            best_quant_for_runtime_budget(
+                model,
+                runtime,
+                budget,
+                estimation_ctx,
+                allocator_cache_fraction,
+            )
+        };
 
         // Step 1: pick the best available execution path
         // Step 2: score memory fit purely on headroom in that path's memory pool
         let (run_mode, mem_required, mem_available) = if system.cluster_mode {
             // Cluster mode: vLLM with tensor parallelism across multiple nodes.
             // Total VRAM is the sum across all nodes (NCCL handles distribution).
-            let pool = system.total_gpu_vram_gb.unwrap_or(0.0);
+            let pool =
+                vram_reserve_components(system.total_gpu_vram_gb.unwrap_or(0.0), system, &config).0;
             let tp_size = system.cluster_node_count;
             if let Some((_, best_mem)) = choose_quant(pool) {
                 notes.push(format!(
@@ -506,11 +563,22 @@ impl ModelFit {
                         (RunMode::Gpu, default_mem_required, pool)
                     }
                 } else {
-                    cpu_path(model, system, runtime, estimation_ctx, &mut notes)
+                    cpu_path(
+                        model,
+                        system,
+                        runtime,
+                        estimation_ctx,
+                        allocator_cache_fraction,
+                        &mut notes,
+                    )
                 }
-            } else if let Some(system_vram) = system.total_gpu_vram_gb {
+            } else if let Some(raw_vram) = system.total_gpu_vram_gb {
+                // Effective VRAM across all same-model GPUs after the V2-b
+                // environment reserve + fragmentation floor. Multi-GPU
+                // inference (tensor splitting) is supported by llama.cpp,
+                // vLLM, etc.
+                let system_vram = vram_reserve_components(raw_vram, system, &config).0;
                 // Use total VRAM across all same-model GPUs for fit scoring.
-                // Multi-GPU inference (tensor splitting) is supported by llama.cpp, vLLM, etc.
                 if model.is_moe && min_vram <= system_vram {
                     // Fits in VRAM -- GPU path
                     notes.push("GPU: model loaded into VRAM".to_string());
@@ -526,9 +594,13 @@ impl ModelFit {
                     // model fits at the best available quant before falling to offload.
                     // Many runtimes (llama.cpp, Ollama) load ALL experts into VRAM when
                     // the quantized model file fits, avoiding DDR bandwidth bottleneck.
-                    if let Some((best_q, best_mem)) =
-                        best_quant_for_runtime_budget(model, runtime, system_vram, estimation_ctx)
-                        && best_mem <= system_vram
+                    if let Some((best_q, best_mem)) = best_quant_for_runtime_budget(
+                        model,
+                        runtime,
+                        system_vram,
+                        estimation_ctx,
+                        allocator_cache_fraction,
+                    ) && best_mem <= system_vram
                     {
                         notes.push(
                             "GPU: all MoE experts loaded into VRAM (quantized fit)".to_string(),
@@ -564,10 +636,24 @@ impl ModelFit {
             } else {
                 // GPU detected but VRAM unknown -- fall through to CPU
                 notes.push("GPU detected but VRAM unknown".to_string());
-                cpu_path(model, system, runtime, estimation_ctx, &mut notes)
+                cpu_path(
+                    model,
+                    system,
+                    runtime,
+                    estimation_ctx,
+                    allocator_cache_fraction,
+                    &mut notes,
+                )
             }
         } else {
-            cpu_path(model, system, runtime, estimation_ctx, &mut notes)
+            cpu_path(
+                model,
+                system,
+                runtime,
+                estimation_ctx,
+                allocator_cache_fraction,
+                &mut notes,
+            )
         };
 
         // Score fit purely on memory headroom (Perfect requires GPU)
@@ -661,6 +747,17 @@ impl ModelFit {
                     .then(|| ddr_bandwidth_gbps(&config)),
                 pcie_bandwidth_gbps: matches!(run_mode, RunMode::MoeOffload | RunMode::CpuOffload)
                     .then(|| pcie_bandwidth_gbps(&config)),
+                // Environment VRAM reserve actually applied (0 on unified
+                // memory or when there is no discrete pool). The fragmentation
+                // floor is pure policy: max(VRAM_FLOOR_FRACTION × pool,
+                // VRAM_FLOOR_MIN_GB).
+                vram_environment_reserve_gb: if system.unified_memory {
+                    None
+                } else {
+                    system
+                        .total_gpu_vram_gb
+                        .map(|raw| vram_reserve_components(raw, system, &config).1)
+                },
                 efficiency: config.efficiency,
                 assumed_context: estimation_ctx,
                 local_calibration: None,
@@ -712,7 +809,12 @@ impl ModelFit {
         // window. Suggested by @MrMarble in issue #621.
         let usable_context = {
             const REF_CTX: u32 = 4096;
-            let fixed_mem = model.estimate_memory_gb(&best_quant_str, 0);
+            let fixed_mem = model.estimate_memory_gb_with_reserve(
+                &best_quant_str,
+                0,
+                KvQuant::Fp16,
+                allocator_cache_fraction,
+            );
             let leftover = (mem_available - fixed_mem).max(0.0);
             let per_token_gb = model.kv_cache_gb(REF_CTX, KvQuant::Fp16) / f64::from(REF_CTX);
             if per_token_gb > 0.0 {
@@ -726,10 +828,11 @@ impl ModelFit {
         // Only compute on CUDA systems — TurboQuant requires vLLM + CUDA.
         let fits_with_turboquant =
             fit_level == FitLevel::TooTight && system.backend == GpuBackend::Cuda && {
-                let tq_mem = model.estimate_memory_gb_with_kv(
+                let tq_mem = model.estimate_memory_gb_with_reserve(
                     best_quant,
                     estimation_ctx,
                     KvQuant::TurboQuant,
+                    allocator_cache_fraction,
                 );
                 tq_mem <= mem_available
             };
@@ -889,6 +992,7 @@ fn cpu_path(
     system: &SystemSpecs,
     runtime: InferenceRuntime,
     estimation_ctx: u32,
+    allocator_cache_fraction: f64,
     notes: &mut Vec<String>,
 ) -> (RunMode, f64, f64) {
     notes.push("CPU-only: model loaded into system RAM".to_string());
@@ -897,14 +1001,23 @@ fn cpu_path(
         return (RunMode::CpuOnly, model.min_ram_gb, system.available_ram_gb);
     }
 
-    if let Some((_, best_mem)) =
-        best_quant_for_runtime_budget(model, runtime, system.available_ram_gb, estimation_ctx)
-    {
+    if let Some((_, best_mem)) = best_quant_for_runtime_budget(
+        model,
+        runtime,
+        system.available_ram_gb,
+        estimation_ctx,
+        allocator_cache_fraction,
+    ) {
         (RunMode::CpuOnly, best_mem, system.available_ram_gb)
     } else {
         (
             RunMode::CpuOnly,
-            model.estimate_memory_gb(model.quantization.as_str(), estimation_ctx),
+            model.estimate_memory_gb_with_reserve(
+                model.quantization.as_str(),
+                estimation_ctx,
+                KvQuant::Fp16,
+                allocator_cache_fraction,
+            ),
             system.available_ram_gb,
         )
     }
@@ -1014,6 +1127,7 @@ fn best_quant_for_runtime_budget(
     runtime: InferenceRuntime,
     budget: f64,
     estimation_ctx: u32,
+    allocator_cache_fraction: f64,
 ) -> Option<(String, f64)> {
     // Pre-quantized models (vLLM) can't be re-quantized, so there is no
     // hierarchy to search — but they still have one fixed footprint. Report
@@ -1022,7 +1136,12 @@ fn best_quant_for_runtime_budget(
     // 24 GB card ended up labelled "Perfect" alongside an "Insufficient VRAM
     // and system RAM" note.
     if runtime == InferenceRuntime::Vllm {
-        let required = model.estimate_memory_gb(model.quantization.as_str(), estimation_ctx);
+        let required = model.estimate_memory_gb_with_reserve(
+            model.quantization.as_str(),
+            estimation_ctx,
+            KvQuant::Fp16,
+            allocator_cache_fraction,
+        );
         return (required <= budget).then(|| (model.quantization.clone(), required));
     }
     let hierarchy: &[&str] = if model.format == models::ModelFormat::Onnx {
@@ -1033,7 +1152,12 @@ fn best_quant_for_runtime_budget(
         models::QUANT_HIERARCHY
     };
     model
-        .best_quant_for_budget_with(budget, estimation_ctx, hierarchy)
+        .best_quant_for_budget_with_reserve(
+            budget,
+            estimation_ctx,
+            hierarchy,
+            allocator_cache_fraction,
+        )
         .or_else(|| {
             if runtime == InferenceRuntime::Mlx {
                 model.best_quant_for_budget(budget, estimation_ctx)
@@ -1300,6 +1424,58 @@ fn pcie_bandwidth_gbps(config: &CalcConfig) -> f64 {
         return bw;
     }
     crate::hardware::measured_pcie_bandwidth_gbps().unwrap_or(DEFAULT_PCIE_BANDWIDTH_GBPS)
+}
+
+/// Fragmentation floor: never promise more than this share of the raw VRAM
+/// pool to a workload (V2-b global rule).
+pub const VRAM_FLOOR_FRACTION: f64 = 0.10;
+/// Absolute fragmentation floor in GB — `max(fraction, this)` decides (V2-b).
+pub const VRAM_FLOOR_MIN_GB: f64 = 2.0;
+
+/// Environment VRAM consumed outside the inference process, in GB.
+///
+/// Resolution order:
+///  1. `CalcConfig::vram_display_reserve_gb` (TUI Advanced Config / tests)
+///  2. `LLMFIT_VRAM_DISPLAY_RESERVE` env var
+///  3. VRAM in use measured at detection time
+///     (`SystemSpecs::measured_vram_in_use_gb`, nvidia-smi / amdgpu sysfs)
+///  4. OS heuristic: Windows/DWM 0.75 GB, other platforms 0.25 GB
+fn environment_vram_reserve_gb(system: &SystemSpecs, config: &CalcConfig) -> f64 {
+    if let Some(v) = config.vram_display_reserve_gb.filter(|v| *v >= 0.0) {
+        return v;
+    }
+    if let Some(v) = std::env::var("LLMFIT_VRAM_DISPLAY_RESERVE")
+        .ok()
+        .and_then(|s| s.trim().parse::<f64>().ok())
+        .filter(|v| *v >= 0.0)
+    {
+        return v;
+    }
+    if let Some(used) = system.measured_vram_in_use_gb {
+        return used;
+    }
+    if cfg!(windows) { 0.75 } else { 0.25 }
+}
+
+/// Reserve components for a raw discrete-VRAM pool:
+/// `(effective_pool, environment_reserve, fragmentation_floor)`.
+///
+/// The effective pool subtracts the environment reserve plus the global
+/// fragmentation floor `max(VRAM_FLOOR_FRACTION × pool, VRAM_FLOOR_MIN_GB)`.
+/// Unified-memory pools pass through untouched: Metal's
+/// `recommendedMaxWorkingSetSize` already nets OS/desktop usage out of
+/// `gpu_available_gb`, so double-counting would overstate the reserve.
+pub fn vram_reserve_components(
+    raw_pool_gb: f64,
+    system: &SystemSpecs,
+    config: &CalcConfig,
+) -> (f64, f64, f64) {
+    if system.unified_memory || raw_pool_gb <= 0.0 {
+        return (raw_pool_gb.max(0.0), 0.0, 0.0);
+    }
+    let env = environment_vram_reserve_gb(system, config);
+    let floor = (VRAM_FLOOR_FRACTION * raw_pool_gb).max(VRAM_FLOOR_MIN_GB);
+    ((raw_pool_gb - env - floor).max(0.0), env, floor)
 }
 
 /// Seconds per token spent moving the residual stream across the host↔GPU
@@ -2065,6 +2241,7 @@ mod tests {
             gpu_vram_gb: vram,
             total_gpu_vram_gb: vram, // same as gpu_vram_gb for single-GPU tests
             gpu_available_gb: None,
+            measured_vram_in_use_gb: None,
             gpu_name: if has_gpu {
                 Some("Test GPU".to_string())
             } else {
@@ -2163,14 +2340,23 @@ mod tests {
     #[test]
     fn test_model_fit_gpu_path() {
         let model = test_model("7B", 4.0, Some(4.0));
-        let system = test_system(16.0, true, Some(8.0));
+        let system = test_system(16.0, true, Some(12.0));
+        // Pin the environment reserve so the expected pool below holds on
+        // every platform (the auto heuristic differs between Windows and
+        // Linux).
+        let config = CalcConfig {
+            vram_display_reserve_gb: Some(0.25),
+            ..CalcConfig::default()
+        };
 
-        let fit = ModelFit::analyze(&model, &system);
+        let fit = ModelFit::analyze_with_config(&model, &system, config);
 
         // Should use GPU path
         assert_eq!(fit.run_mode, RunMode::Gpu);
         assert!(matches!(fit.fit_level, FitLevel::Good | FitLevel::Perfect));
-        assert_eq!(fit.memory_available_gb, 8.0);
+        // Effective pool: 12 GB raw − 0.25 GB display reserve − 2.0 GB
+        // fragmentation floor (max(10 % × 12, 2 GiB) = 2.0).
+        assert!((fit.memory_available_gb - 9.75).abs() < 1e-9);
     }
 
     #[test]
@@ -2273,13 +2459,116 @@ mod tests {
     }
 
     #[test]
+    fn test_vram_reserve_components_floor_rule() {
+        let config = CalcConfig {
+            vram_display_reserve_gb: Some(0.25),
+            ..test_config()
+        };
+        let system = test_system(64.0, true, Some(8.0));
+
+        // Small card: the absolute 2 GiB floor beats 10 % (0.8 GB).
+        let (pool, env, floor) = vram_reserve_components(8.0, &system, &config);
+        assert!((pool - 5.75).abs() < 1e-9);
+        assert!((env - 0.25).abs() < 1e-9);
+        assert!((floor - 2.0).abs() < 1e-9);
+
+        // Big card: the percentage floor takes over (10 % × 30 = 3 GB).
+        let (pool, _env, floor) = vram_reserve_components(30.0, &system, &config);
+        assert!((pool - 26.75).abs() < 1e-9);
+        assert!((floor - 3.0).abs() < 1e-9);
+
+        // A card smaller than the reserve itself reports nothing usable
+        // rather than a negative pool.
+        assert_eq!(vram_reserve_components(0.5, &system, &config).0, 0.0);
+    }
+
+    #[test]
+    fn test_vram_reserve_components_unified_memory_passthrough() {
+        let mut system = test_system(36.0, true, Some(36.0));
+        system.unified_memory = true;
+        let config = CalcConfig {
+            vram_display_reserve_gb: Some(4.0),
+            ..test_config()
+        };
+        // macOS wired limits already net OS usage out; no double-counting.
+        let (pool, env, floor) = vram_reserve_components(36.0, &system, &config);
+        assert!((pool - 36.0).abs() < 1e-9);
+        assert_eq!(env, 0.0);
+        assert_eq!(floor, 0.0);
+    }
+
+    #[test]
+    fn test_environment_vram_reserve_resolution_order() {
+        // Config override wins even when a measurement is present.
+        let mut system = test_system(64.0, true, Some(24.0));
+        system.measured_vram_in_use_gb = Some(2.5);
+        let config = CalcConfig {
+            vram_display_reserve_gb: Some(1.25),
+            ..test_config()
+        };
+        assert!((environment_vram_reserve_gb(&system, &config) - 1.25).abs() < 1e-9);
+
+        // Without a pin, a real detection-time measurement is used as-is.
+        let config = test_config();
+        assert!((environment_vram_reserve_gb(&system, &config) - 2.5).abs() < 1e-9);
+
+        // Nothing measured: OS heuristic (platform-dependent by design).
+        system.measured_vram_in_use_gb = None;
+        let expected = if cfg!(windows) { 0.75 } else { 0.25 };
+        assert!((environment_vram_reserve_gb(&system, &config) - expected).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_analyze_reports_vram_reserve_note_and_basis() {
+        let model = test_model("7B", 4.0, Some(4.0));
+        let mut system = test_system(32.0, true, Some(12.0));
+        system.measured_vram_in_use_gb = Some(1.5);
+        let config = CalcConfig {
+            ddr_bandwidth_gbps: Some(50.0),
+            ..CalcConfig::default()
+        };
+
+        let fit = ModelFit::analyze_with_config(&model, &system, config.clone());
+
+        // The adjusted pool must be auditable in the notes...
+        assert!(
+            fit.notes.iter().any(|n| n.contains("VRAM reserve")),
+            "notes: {:?}",
+            fit.notes
+        );
+        // ...and the environment component recorded in the estimate basis.
+        assert_eq!(fit.estimate_basis.vram_environment_reserve_gb, Some(1.5));
+        let _ = config;
+    }
+
+    #[test]
+    fn test_analyze_unified_memory_skips_vram_reserve() {
+        let model = test_model("7B", 4.0, Some(4.0));
+        let mut system = test_system(36.0, true, Some(36.0));
+        system.unified_memory = true;
+
+        let fit = ModelFit::analyze_with_config(&model, &system, test_config());
+
+        assert!(!fit.notes.iter().any(|n| n.contains("VRAM reserve")));
+        assert_eq!(fit.estimate_basis.vram_environment_reserve_gb, None);
+        // The pool passes through untouched.
+        assert!((fit.memory_available_gb - 36.0).abs() < 1e-9);
+    }
+
+    #[test]
     fn test_prequantized_quant_budget_reports_own_footprint() {
         let mut model = test_model("14B", 8.3, Some(7.6));
         model.format = models::ModelFormat::Awq;
         model.quantization = "AWQ-4bit".to_string();
 
         // Fits the budget -> reports the model's own fixed quant.
-        let got = best_quant_for_runtime_budget(&model, InferenceRuntime::Vllm, 24.0, 8192);
+        let got = best_quant_for_runtime_budget(
+            &model,
+            InferenceRuntime::Vllm,
+            24.0,
+            8192,
+            models::DEFAULT_ALLOCATOR_CACHE_FRACTION,
+        );
         assert!(
             got.is_some(),
             "fitting pre-quantized model must report a quant"
@@ -2287,7 +2576,16 @@ mod tests {
         assert_eq!(got.unwrap().0, "AWQ-4bit");
 
         // Exceeds the budget -> None, as before.
-        assert!(best_quant_for_runtime_budget(&model, InferenceRuntime::Vllm, 1.0, 8192).is_none());
+        assert!(
+            best_quant_for_runtime_budget(
+                &model,
+                InferenceRuntime::Vllm,
+                1.0,
+                8192,
+                models::DEFAULT_ALLOCATOR_CACHE_FRACTION
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -2857,6 +3155,7 @@ mod tests {
             gpu_vram_gb: Some(vram_gb),
             total_gpu_vram_gb: Some(vram_gb),
             gpu_available_gb: None,
+            measured_vram_in_use_gb: None,
             gpu_name: Some(name.to_string()),
             gpu_count: 1,
             unified_memory: unified,
@@ -2951,7 +3250,12 @@ mod tests {
                     .context_length
                     .unwrap_or(4096)
                     .min(DEFAULT_ESTIMATION_CTX);
-                let mem = model.estimate_memory_gb(&quant, ctx);
+                let mem = model.estimate_memory_gb_with_reserve(
+                    &quant,
+                    ctx,
+                    KvQuant::Fp16,
+                    config.allocator_cache_fraction,
+                );
                 let fits_gpu =
                     specs.unified_memory || specs.gpu_vram_gb.map(|v| mem <= v).unwrap_or(false);
                 if !fits_gpu {
@@ -3764,6 +4068,7 @@ mod tests {
             gpu_vram_gb: Some(vram),
             total_gpu_vram_gb: Some(vram),
             gpu_available_gb: None,
+            measured_vram_in_use_gb: None,
             gpu_name: Some(gpu_name.to_string()),
             gpu_count: 1,
             unified_memory: false,
@@ -4361,6 +4666,7 @@ mod tests {
             gpu_vram_gb: Some(16.0),
             total_gpu_vram_gb: Some(16.0),
             gpu_available_gb: None,
+            measured_vram_in_use_gb: None,
             gpu_name: Some("AMD Radeon RX 6900 XT".to_string()),
             gpu_count: 1,
             unified_memory: false,
