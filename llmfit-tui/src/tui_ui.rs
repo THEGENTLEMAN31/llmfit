@@ -5569,7 +5569,7 @@ fn draw_bench(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeColors) {
                                 )));
                             } else if !t.response_preview.is_empty() {
                                 detail_lines.push(Line::from(Span::styled(
-                                    format!("  │      Preview: {}…", &t.response_preview),
+                                    format!("  │      Preview: {}…", t.response_preview),
                                     Style::default().fg(tc.muted),
                                 )));
                             }
@@ -5783,7 +5783,7 @@ mod tests {
             None,
             "unsloth",
             &providers,
-            &vec![true, true, true]
+            &[true, true, true]
         ));
     }
 

@@ -3297,9 +3297,7 @@ impl App {
     pub fn use_case_popup_select_all(&mut self) {
         let all_selected = self.selected_use_cases.iter().all(|&s| s);
         let new_val = !all_selected;
-        for s in &mut self.selected_use_cases {
-            *s = new_val;
-        }
+        self.selected_use_cases.fill(new_val);
         self.apply_filters();
     }
 
@@ -3334,9 +3332,7 @@ impl App {
     pub fn capability_popup_select_all(&mut self) {
         let all_selected = self.selected_capabilities.iter().all(|&s| s);
         let new_val = !all_selected;
-        for s in &mut self.selected_capabilities {
-            *s = new_val;
-        }
+        self.selected_capabilities.fill(new_val);
         self.apply_filters();
     }
 
@@ -3503,9 +3499,7 @@ impl App {
     pub fn quant_popup_select_all(&mut self) {
         let all_selected = self.selected_quants.iter().all(|&s| s);
         let new_val = !all_selected;
-        for s in &mut self.selected_quants {
-            *s = new_val;
-        }
+        self.selected_quants.fill(new_val);
         self.apply_filters();
     }
 
@@ -3538,9 +3532,7 @@ impl App {
     pub fn run_mode_popup_select_all(&mut self) {
         let all_selected = self.selected_run_modes.iter().all(|&s| s);
         let new_val = !all_selected;
-        for s in &mut self.selected_run_modes {
-            *s = new_val;
-        }
+        self.selected_run_modes.fill(new_val);
         self.apply_filters();
     }
 
@@ -3573,9 +3565,7 @@ impl App {
     pub fn params_bucket_popup_select_all(&mut self) {
         let all_selected = self.selected_params_buckets.iter().all(|&s| s);
         let new_val = !all_selected;
-        for s in &mut self.selected_params_buckets {
-            *s = new_val;
-        }
+        self.selected_params_buckets.fill(new_val);
         self.apply_filters();
     }
 
@@ -3612,9 +3602,7 @@ impl App {
     pub fn license_popup_select_all(&mut self) {
         let all_selected = self.selected_licenses.iter().all(|&s| s);
         let new_val = !all_selected;
-        for s in &mut self.selected_licenses {
-            *s = new_val;
-        }
+        self.selected_licenses.fill(new_val);
         self.apply_filters();
     }
 
@@ -3649,9 +3637,7 @@ impl App {
     pub fn runtime_popup_select_all(&mut self) {
         let all_selected = self.selected_runtimes.iter().all(|&s| s);
         let new_val = !all_selected;
-        for s in &mut self.selected_runtimes {
-            *s = new_val;
-        }
+        self.selected_runtimes.fill(new_val);
         self.apply_filters();
     }
 
@@ -3739,7 +3725,7 @@ impl App {
             })
             .collect();
 
-        self.all_fits = llmfit_core::fit::rank_models_by_fit(self.all_fits.drain(..).collect());
+        self.all_fits = llmfit_core::fit::rank_models_by_fit(std::mem::take(&mut self.all_fits));
         self.selected_row = 0;
         self.compare_models.clear();
         self.compare_mark_model = None;
@@ -4190,7 +4176,7 @@ impl App {
             })
             .collect();
 
-        self.all_fits = llmfit_core::fit::rank_models_by_fit(self.all_fits.drain(..).collect());
+        self.all_fits = llmfit_core::fit::rank_models_by_fit(std::mem::take(&mut self.all_fits));
         self.selected_row = 0;
         self.compare_models.clear();
         self.compare_mark_model = None;

@@ -1763,7 +1763,7 @@ impl SystemSpecs {
     fn parse_vulkan_gpus(text: &str) -> Vec<GpuInfo> {
         let mut grouped: BTreeMap<String, u32> = BTreeMap::new();
 
-        for name in Self::parse_vulkan_device_names(&text) {
+        for name in Self::parse_vulkan_device_names(text) {
             if Self::is_software_vulkan_device(&name) {
                 continue;
             }

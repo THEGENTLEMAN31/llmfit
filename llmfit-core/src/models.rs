@@ -177,12 +177,12 @@ pub fn parse_generation(architecture: Option<&str>, name: &str) -> Option<f64> {
             return Some(1.0);
         }
         // Llama: llama, llama4
-        if let Some(suffix) = arch_lower.strip_prefix("llama") {
-            if suffix.starts_with('4') {
-                return Some(4.0);
-            }
-            // Architecture is just "llama" — fall through to name-based parsing
+        if let Some(suffix) = arch_lower.strip_prefix("llama")
+            && suffix.starts_with('4')
+        {
+            return Some(4.0);
         }
+        // Architecture is just "llama" — fall through to name-based parsing
         // Gemma: gemma, gemma2, gemma3, gemma4
         if let Some(suffix) = arch_lower.strip_prefix("gemma") {
             if suffix.starts_with('4') {
@@ -1564,10 +1564,9 @@ fn parse_parameter_count_raw(parameter_count: &str) -> Option<u64> {
     let trimmed = parameter_count.trim().to_uppercase();
     let (number, multiplier) = if let Some(number) = trimmed.strip_suffix('B') {
         (number, 1_000_000_000.0)
-    } else if let Some(number) = trimmed.strip_suffix('M') {
-        (number, 1_000_000.0)
     } else {
-        return None;
+        let number = trimmed.strip_suffix('M')?;
+        (number, 1_000_000.0)
     };
 
     number

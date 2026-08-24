@@ -954,7 +954,7 @@ impl ModelFit {
 /// - CpuOnly: caps at Good -- no GPU acceleration so never Perfect, but a model
 ///   that fits with comfortable headroom is genuinely runnable, not Marginal.
 /// - Serving (vLLM batched): same headroom bands as GPU, since it also runs on GPU.
-fn score_fit(
+pub fn score_fit(
     mem_required: f64,
     mem_available: f64,
     recommended: f64,
@@ -1214,7 +1214,7 @@ fn moe_offload_path(
 }
 
 /// Compute MoE active VRAM + offloaded RAM for a specific quantization level.
-fn moe_memory_for_quant(model: &LlmModel, quant: &str) -> Option<(f64, f64)> {
+pub fn moe_memory_for_quant(model: &LlmModel, quant: &str) -> Option<(f64, f64)> {
     if !model.is_moe {
         return None;
     }
@@ -2028,7 +2028,7 @@ impl RunModeFactors {
 // Multi-dimensional scoring (Quality, Speed, Fit, Context)
 // ────────────────────────────────────────────────────────────────────
 
-fn compute_scores(
+pub fn compute_scores(
     model: &LlmModel,
     quant: &str,
     use_case: UseCase,
@@ -2258,7 +2258,7 @@ fn context_score(model: &LlmModel, use_case: UseCase) -> f64 {
 
 /// Weighted composite score based on use-case category.
 /// Weights: [Quality, Speed, Fit, Context]
-fn weighted_score(sc: ScoreComponents, use_case: UseCase, config: &CalcConfig) -> f64 {
+pub fn weighted_score(sc: ScoreComponents, use_case: UseCase, config: &CalcConfig) -> f64 {
     let (wq, ws, wf, wc) = config.scoring_weights.get(use_case);
     let raw = sc.quality * wq + sc.speed * ws + sc.fit * wf + sc.context * wc;
     (raw * 10.0).round() / 10.0
@@ -5155,7 +5155,7 @@ mod tests {
             let ratio = estimated / fix.measured_tps;
 
             assert!(
-                ratio >= 0.8 && ratio <= 1.2,
+                (0.8..=1.2).contains(&ratio),
                 "{}: estimate {:.1} tok/s vs measured {:.1} tok/s (ratio={:.2}). \
                  Two-component model should give ±20% across ALL quants",
                 fix.name,

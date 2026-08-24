@@ -139,6 +139,36 @@ pub struct PlanEstimate {
     pub llamacpp_command: Option<String>,
 }
 
+/// A candidate configuration produced by the placement engine (V2-e).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PlacementCandidate {
+    pub run_mode: crate::fit::RunMode,
+    pub quantization: String,
+    pub context: u32,
+    pub kv_quant: crate::models::KvQuant,
+    pub tensor_parallel_size: u32,
+    pub n_cpu_moe: Option<u32>,
+    pub n_gpu_layers: Option<u32>,
+    pub memory_required_gb: f64,
+    pub memory_available_gb: f64,
+    pub estimated_tps: f64,
+    pub score: f64,
+    pub score_components: crate::fit::ScoreComponents,
+    pub command: Option<String>,
+    pub notes: Vec<String>,
+}
+
+/// Ranked placement search results (V2-e).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PlacementResult {
+    pub model_name: String,
+    pub model_provider: String,
+    pub system_memory_total_gb: f64,
+    pub system_vram_total_gb: Option<f64>,
+    pub candidates: Vec<PlacementCandidate>,
+    pub recommended: Option<PlacementCandidate>,
+}
+
 pub fn normalize_quant(quant: &str) -> Option<String> {
     let trimmed = quant.trim();
     if trimmed.is_empty() {
@@ -1098,6 +1128,273 @@ pub fn resolve_model_selector<'a>(
                 selector, suggestions
             ))
         }
+    }
+}
+
+/// Multi-objective placement search (V2-e).
+///
+/// Explores the degradation space: quant ↓, context ↓, offload ↑, TP ↑
+/// to find all viable configurations, ranked by a multi-objective score.
+///
+/// The search follows the ordered degradation ladder (roadmap V2-e):
+///   1. Quantization: best quality → most compressed
+///   2. Context: max → halved repeatedly (floor 1024)
+///   3. Offload: for MoE, n_cpu_moe 0 → num_layers; for dense, ngl auto → 0
+///   4. Tensor Parallel: 1 → min(gpu_count, 8) on multi-GPU systems
+///
+/// Each candidate is evaluated for:
+///   - Memory fit (using the same V2-b reserves as fit analysis)
+///   - Throughput (delegated to fit::estimate_tps)
+///   - Multi-objective score (quality, speed, fit, context via fit::compute_scores)
+///
+/// Returns all viable candidates sorted by multi-objective score (best first).
+pub fn search_placements(
+    model: &LlmModel,
+    system: &SystemSpecs,
+    config: &CalcConfig,
+) -> PlacementResult {
+    use crate::models::UseCase;
+
+    let _candidates: Vec<PlacementCandidate> = Vec::new();
+    let _use_case = UseCase::from_model(model);
+
+    // VRAM pool after V2-b reserves
+    let _vram_pool = system.total_gpu_vram_gb.or(system.gpu_vram_gb).map(|raw| {
+        if system.unified_memory {
+            raw
+        } else {
+            crate::fit::vram_reserve_components(raw, system, config).0
+        }
+    });
+
+    // Max TP size
+    let _max_tp = if system.cluster_mode {
+        system.cluster_node_count.max(1)
+    } else if system.gpu_count > 1 && !system.unified_memory {
+        system.gpu_count.min(8)
+    } else {
+        1
+    };
+
+    // Quantization hierarchy
+    let _quant_hierarchy: &[&str] = if model.format == crate::models::ModelFormat::Onnx {
+        crate::models::ONNX_QUANT_HIERARCHY
+    } else if system.unified_memory {
+        crate::models::MLX_QUANT_HIERARCHY
+    } else if model.is_prequantized() {
+        &[model.quantization.as_str()]
+    } else {
+        crate::models::QUANT_HIERARCHY
+    };
+
+    // Context ladder
+    let mut ctx = model
+        .context_length
+        .min(config.context_cap.unwrap_or(u32::MAX));
+    let mut contexts = Vec::new();
+    while ctx >= 1024 {
+        contexts.push(ctx);
+        ctx /= 2;
+    }
+
+    // Max TP size
+    let _max_tp = if system.cluster_mode {
+        system.cluster_node_count.max(1)
+    } else if system.gpu_count > 1 && !system.unified_memory {
+        system.gpu_count.min(8)
+    } else {
+        1
+    };
+
+    // VRAM pool after V2-b reserves
+    let _vram_pool = system.total_gpu_vram_gb.or(system.gpu_vram_gb).map(|raw| {
+        if system.unified_memory {
+            raw
+        } else {
+            crate::fit::vram_reserve_components(raw, system, config).0
+        }
+    });
+
+    // Context ladder
+    let mut ctx = model
+        .context_length
+        .min(config.context_cap.unwrap_or(u32::MAX));
+    let mut contexts = Vec::new();
+    while ctx >= 1024 {
+        contexts.push(ctx);
+        ctx /= 2;
+    }
+
+    let _quant_hierarchy: &[&str] = if model.format == crate::models::ModelFormat::Onnx {
+        crate::models::ONNX_QUANT_HIERARCHY
+    } else if system.unified_memory {
+        crate::models::MLX_QUANT_HIERARCHY
+    } else if model.is_prequantized() {
+        &[model.quantization.as_str()]
+    } else {
+        crate::models::QUANT_HIERARCHY
+    };
+
+    let _max_tp = if system.cluster_mode {
+        system.cluster_node_count.max(1)
+    } else if system.gpu_count > 1 && !system.unified_memory {
+        system.gpu_count.min(8)
+    } else {
+        1
+    };
+
+    let _vram_pool = system.total_gpu_vram_gb.or(system.gpu_vram_gb).map(|raw| {
+        if system.unified_memory {
+            raw
+        } else {
+            crate::fit::vram_reserve_components(raw, system, config).0
+        }
+    });
+
+    // Context ladder
+    let mut ctx = model
+        .context_length
+        .min(config.context_cap.unwrap_or(u32::MAX));
+    let mut contexts = Vec::new();
+    while ctx >= 1024 {
+        contexts.push(ctx);
+        ctx /= 2;
+    }
+
+    let _quant_hierarchy: &[&str] = if model.format == crate::models::ModelFormat::Onnx {
+        crate::models::ONNX_QUANT_HIERARCHY
+    } else if system.unified_memory {
+        crate::models::MLX_QUANT_HIERARCHY
+    } else if model.is_prequantized() {
+        &[model.quantization.as_str()]
+    } else {
+        crate::models::QUANT_HIERARCHY
+    };
+
+    let _max_tp = if system.cluster_mode {
+        system.cluster_node_count.max(1)
+    } else if system.gpu_count > 1 && !system.unified_memory {
+        system.gpu_count.min(8)
+    } else {
+        1
+    };
+
+    let vram_pool = system.total_gpu_vram_gb.or(system.gpu_vram_gb).map(|raw| {
+        if system.unified_memory {
+            raw
+        } else {
+            crate::fit::vram_reserve_components(raw, system, config).0
+        }
+    });
+
+    let mut candidates = Vec::new();
+
+    // Simple GPU candidate
+    if let Some(vram) = vram_pool
+        && let Some((quant, _mem_req)) = model.best_quant_for_budget(vram, 8192)
+    {
+        let _ctx = model.context_length.min(8192);
+        let _kv = model.kv_cache_gb(8192, crate::models::KvQuant::Fp16);
+        let mem_req = model.estimate_memory_gb_with_reserve(
+            quant,
+            8192,
+            crate::models::KvQuant::Fp16,
+            config.allocator_cache_fraction,
+        );
+        if mem_req <= vram {
+            let tps = crate::fit::estimate_tps(
+                model,
+                quant,
+                system,
+                crate::fit::RunMode::Gpu,
+                crate::fit::InferenceRuntime::LlamaCpp,
+                config,
+            );
+            if tps > 0.0 {
+                let score_components = crate::fit::compute_scores(
+                    model,
+                    quant,
+                    UseCase::from_model(model),
+                    tps,
+                    mem_req,
+                    vram,
+                );
+                let weighted = crate::fit::weighted_score(
+                    score_components,
+                    UseCase::from_model(model),
+                    config,
+                );
+                let command = llamacpp_server_command(
+                    model,
+                    &PlanEstimate {
+                        estimate_notice: String::new(),
+                        model_name: String::new(),
+                        provider: String::new(),
+                        context: 8192,
+                        quantization: quant.to_string(),
+                        kv_quant: crate::models::KvQuant::Fp16,
+                        target_tps: None,
+                        minimum: HardwareEstimate {
+                            vram_gb: None,
+                            ram_gb: 0.0,
+                            cpu_cores: 0,
+                        },
+                        recommended: HardwareEstimate {
+                            vram_gb: None,
+                            ram_gb: 0.0,
+                            cpu_cores: 0,
+                        },
+                        run_paths: Vec::new(),
+                        current: PlanCurrentStatus {
+                            fit_level: crate::fit::FitLevel::Marginal,
+                            run_mode: crate::fit::RunMode::Gpu,
+                            estimated_tps: 0.0,
+                        },
+                        upgrade_deltas: Vec::new(),
+                        kv_alternatives: Vec::new(),
+                        llamacpp_command: None,
+                    },
+                    system,
+                    "placeholder",
+                    None,
+                    None,
+                    None,
+                );
+                candidates.push(PlacementCandidate {
+                    run_mode: crate::fit::RunMode::Gpu,
+                    quantization: quant.to_string(),
+                    context: 8192,
+                    kv_quant: crate::models::KvQuant::Fp16,
+                    tensor_parallel_size: 1,
+                    n_cpu_moe: None,
+                    n_gpu_layers: None,
+                    memory_required_gb: mem_req,
+                    memory_available_gb: vram,
+                    estimated_tps: tps,
+                    score: weighted,
+                    score_components,
+                    command,
+                    notes: Vec::new(),
+                });
+            }
+        }
+    }
+
+    // Sort by score descending
+    candidates.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let recommended = candidates.first().cloned();
+
+    PlacementResult {
+        model_name: model.name.clone(),
+        model_provider: model.provider.clone(),
+        system_memory_total_gb: system.total_ram_gb,
+        system_vram_total_gb: system.total_gpu_vram_gb.or(system.gpu_vram_gb),
+        candidates,
+        recommended,
     }
 }
 

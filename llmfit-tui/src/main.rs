@@ -2258,7 +2258,7 @@ fn build_plan_model_ref(
     } else {
         // Repo id; pick the variant from --quant or the resolved filename.
         let variant = quant
-            .map(|q| llmfit_core::plan::normalize_quant(q))
+            .map(llmfit_core::plan::normalize_quant)
             .unwrap_or_else(|| gguf_variant_from_filename(selector));
         match variant {
             Some(v) => format!("-hf {selector}:{v}"),
@@ -2982,7 +2982,7 @@ fn display_quality_result(result: &quality::ModelQualityResult) {
             "  {:20} {:>5.1}    {:>10}  {:>7.1}",
             truncate_str(&rs.role, 20),
             rs.quality,
-            &speed_str,
+            speed_str,
             rs.composite,
         );
     }
