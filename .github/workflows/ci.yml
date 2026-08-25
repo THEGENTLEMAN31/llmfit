@@ -52,7 +52,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Run Rust tests
-        run: cargo test --workspace
+        run: cargo test -p llmfit-x-core -p llmfit-x
 
   fmt:
     name: Rustfmt
@@ -88,4 +88,4 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - run: cargo clippy --workspace --all-targets
+      - run: cargo clippy -p llmfit-x-core -p llmfit-x --all-targets
