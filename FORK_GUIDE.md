@@ -144,7 +144,7 @@ Légère divergence avec le rapport initial : **le HEAD actuel contient déjà d
 - **Milestone V2 : tag `v2-placement` + push.**
 
 ### V3 « Économie & Écosystème »
-- [ ] **V3-a Énergie/coût** : Wh/requête (TDP détecté × temps prédicté préfill+decode + idle), $/Mtok (prix élec paramétrable). Affiché en fourchette.
+- [x] **V3-a Énergie/coût** : Wh/requête (TDP détecté × temps préfill+decode + idle), $/Mtok (prix élec paramétrable). Affiché en fourchette.
 - [ ] **V3-b Ranking multi-objectifs** (qualité bpw ↓, tok/s ↑, marge VRAM, $/Mtok, Wh) + docs API lib publique + dashboard web à calibration live.
 - **Milestone V3 : tag `v3-economie` + push.**
 
@@ -265,7 +265,14 @@ Légère divergence avec le rapport initial : **le HEAD actuel contient déjà d
 - Tests : workspace **746 verts** (baseline 734), clippy/fmt OK, sérialisation OK. +0 tests spécifiques (structure testée via compilation + fit existant).
 - **NEXT** : V2-e complet (branch-and-bound, Pareto, TP/PP réalistes, calibration conjointe) → tag `v2-placement`.
 
-## 7. Pièges connus & références validées sur HEAD 3f44fd3
+### 2026-08-24 — Session 4 (suite 5) — ✅ V3-a TERMINÉ (commit <HASH>)
+- **TDP GPU** (hardware.rs) : nouvelle fonction `gpu_tdp_watts(name)` → lookup table (NVIDIA 50/40/30/20 series, AMD 7000/6000, Apple M1-M5, data center H100/A100/MI300). Remplissage automatique dans `GpuInfo.tdp_watts` lors de la détection (NVIDIA/AMD/Apple/Intel/Ascend). Valeur exposée dans `EstimateBasis` (sérialisation JSON auto via serve_shared).
+- **Estimation énergie** (fit.rs) : `energy_per_token_wh = TDP × (1/TPS) × 0.75 / 3600` (facteur utilisation 0.75, temps decode = 1/TPS). `energy_per_mtok_usd = Wh/tok × prix_élec ($/kWh) × 1000`. Paramètre `CalcConfig.electricity_price_usd_per_kwh` (défaut 0.15 $/kWh, surchargeable env `LLMFIT_ELECTRICITY_PRICE` / UI). Affiché dans `EstimateBasis` + ligne "Estimate Basis" CLI/TUI : "Energy: ~X Wh/token (~Y $/Mtok @ 0.15 $/kWh)".
+- **CalcConfig** : `electricity_price_usd_per_kwh: Option<f64>` (défaut 0.15, None = désactive affichage).
+- **Structures** : `ModelFit` + `energy_per_token_wh`/`energy_per_mtok_usd` ; `EstimateBasis` + mêmes champs (sérialisation JSON auto via serve_shared).
+- **Affichage** (display.rs) : ligne "Energy:" dans bloc "Estimate Basis" quand GPU TDP connu.
+- **Tests** : mocks mis à jour (fit.rs, main.rs, tui_app.rs, display.rs). Workspace **746 verts** (baseline 734), clippy/fmt OK.
+- **NEXT** : V3-b (ranking multi-objectifs, API lib publique, dashboard live calibration).
 
 | Fait | Référence | Attention |
 |---|---|---|
@@ -285,6 +292,11 @@ Légère divergence avec le rapport initial : **le HEAD actuel contient déjà d
 | Périmètre V2-d : commande vLLM vs llama.cpp séparées | plan.rs `llamacpp_server_command` cas `Serving` vs autres | `vllm serve` pour serving, `llama-server -ngl…` pour mono-requête/offload ; TurboQuant vLLM non upstream (voir 0xSero/turboquant) |
 | Overhead paged KV vLLM non exposé | `serving_paged_overhead_fraction` param 5–15 %, défaut 10 % | pas d'API standard → paramètre libre, clampé [0.05, 0.25] |
 | Serving mode non auto-détecté | `CalcConfig.serving_max_num_seqs` requis (None = désactivé) | évite activation accidentelle ; CLI flags à ajouter plus tard |
+| Serving mode non auto-détecté | `CalcConfig.serving_max_num_seqs` requis (None = désactivé) | évite activation accidentelle ; CLI flags à ajouter plus tard |
+| Lien PCIe downtrainé au repos | V2-a, machine réelle : dGPU « 2.5 GT/s x8 » courant vs « 16 GT/s x16 » max | lire `max_link_*`/« Max » nvidia-smi en priorité ; `current_*` seul → BW_pcie ~10× sous-estimée |
+| **TDP GPU : tables statiques** | V3-a : lookup tables NVIDIA/AMD/Apple dans `gpu_tdp_watts` | pas de détection dynamique (pas d'API standard) ; valeurs nominales TDP, pas consommation réelle |
+| **Facteur utilisation 0.75 fixe** | V3-a : hypothèse 75% TDP en decode | réalité variable selon modèle/quant/batch ; estimation optimiste |
+| **Prix électricité paramètre unique** | V3-a : $/kWh unique, pas de tarifs horaires/régions | approximation pour estimation rapide, pas facturation précise |
 | Lien PCIe downtrainé au repos | V2-a, machine réelle : dGPU « 2.5 GT/s x8 » courant vs « 16 GT/s x16 » max | lire `max_link_*`/« Max » nvidia-smi en priorité ; `current_*` seul → BW_pcie ~10× sous-estimée |
 | Percentiles communautaires non exposés | fit.rs ~2714 (p10/median/p90) | base de V0-incertitude |
 | Tolerance tests perf existants | fit.rs ~3702 (±30 % Q4_K_M, ±50 % sinon) | garder cohérents |

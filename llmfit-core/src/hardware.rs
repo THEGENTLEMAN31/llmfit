@@ -37,6 +37,9 @@ pub struct GpuInfo {
     pub backend: GpuBackend,
     pub count: u32, // >1 for same-model multi-GPU (e.g. 2x RTX 4090)
     pub unified_memory: bool,
+    /// Thermal Design Power in watts (from specification), if known.
+    /// Used for energy/cost estimation (V3-a).
+    pub tdp_watts: Option<f64>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -245,6 +248,7 @@ impl SystemSpecs {
                     backend: GpuBackend::Vulkan,
                     count: 1,
                     unified_memory: true,
+                    tdp_watts: gpu_tdp_watts(cpu_name),
                 });
             }
         }
@@ -294,11 +298,12 @@ impl SystemSpecs {
                 "Apple Silicon".to_string()
             };
             gpus.push(GpuInfo {
-                name,
+                name: name.clone(),
                 vram_gb: Some(vram),
                 backend: GpuBackend::Metal,
                 count: 1,
                 unified_memory: true,
+                tdp_watts: gpu_tdp_watts(&name),
             });
         }
 
@@ -438,16 +443,20 @@ impl SystemSpecs {
 
         grouped
             .into_iter()
-            .map(|(name, (count, per_card_vram_mb, is_unified))| GpuInfo {
-                name,
-                vram_gb: if per_card_vram_mb > 0.0 {
-                    Some(per_card_vram_mb / 1024.0)
-                } else {
-                    None
-                },
-                backend: GpuBackend::Cuda,
-                count,
-                unified_memory: is_unified,
+            .map(|(name, (count, per_card_vram_mb, is_unified))| {
+                let tdp = gpu_tdp_watts(&name);
+                GpuInfo {
+                    name,
+                    vram_gb: if per_card_vram_mb > 0.0 {
+                        Some(per_card_vram_mb / 1024.0)
+                    } else {
+                        None
+                    },
+                    backend: GpuBackend::Cuda,
+                    count,
+                    unified_memory: is_unified,
+                    tdp_watts: tdp,
+                }
             })
             .collect()
     }
@@ -495,7 +504,7 @@ impl SystemSpecs {
         grouped
             .into_iter()
             .map(|(name, (count, per_card_vram_mb))| GpuInfo {
-                name,
+                name: name.clone(),
                 vram_gb: if per_card_vram_mb > 0.0 {
                     Some(per_card_vram_mb / 1024.0)
                 } else {
@@ -504,6 +513,7 @@ impl SystemSpecs {
                 backend: GpuBackend::Cuda,
                 count,
                 unified_memory: false,
+                tdp_watts: gpu_tdp_watts(&name),
             })
             .collect()
     }
@@ -583,6 +593,7 @@ impl SystemSpecs {
         }
 
         let unified_memory = is_nvidia_unified_memory_gpu(&name);
+        let tdp = gpu_tdp_watts(&name);
 
         Some(GpuInfo {
             name,
@@ -590,6 +601,7 @@ impl SystemSpecs {
             backend,
             count: gpu_count,
             unified_memory,
+            tdp_watts: tdp,
         })
     }
 
@@ -821,12 +833,14 @@ impl SystemSpecs {
                     let est = estimate_vram_from_name(&name);
                     if est > 0.0 { Some(est) } else { None }
                 };
+                let tdp = gpu_tdp_watts(&name);
                 GpuInfo {
                     name,
                     vram_gb,
                     backend: GpuBackend::Rocm,
                     count,
                     unified_memory: false,
+                    tdp_watts: tdp,
                 }
             })
             .collect()
@@ -939,13 +953,17 @@ impl SystemSpecs {
 
         grouped
             .into_iter()
-            .map(|(name, (count, vram_gb))| GpuInfo {
-                name,
-                // AMD GPU without ROCm — Vulkan is the most likely backend
-                vram_gb,
-                backend: GpuBackend::Vulkan,
-                count,
-                unified_memory: false,
+            .map(|(name, (count, vram_gb))| {
+                let tdp = gpu_tdp_watts(&name);
+                GpuInfo {
+                    name,
+                    // AMD GPU without ROCm — Vulkan is the most likely backend
+                    vram_gb,
+                    backend: GpuBackend::Vulkan,
+                    count,
+                    unified_memory: false,
+                    tdp_watts: tdp,
+                }
             })
             .collect()
     }
@@ -1293,9 +1311,10 @@ impl SystemSpecs {
         Some(GpuInfo {
             backend: Self::infer_gpu_backend(&name),
             vram_gb: Self::resolve_wmi_vram(raw_vram, &name),
-            name,
+            name: name.clone(),
             count: 1,
             unified_memory: false,
+            tdp_watts: gpu_tdp_watts(&name),
         })
     }
 
@@ -1485,6 +1504,7 @@ impl SystemSpecs {
                         backend: GpuBackend::Sycl,
                         count: 1,
                         unified_memory: false,
+                        tdp_watts: gpu_tdp_watts("Intel Graphics"),
                     }];
                 }
             }
@@ -1518,20 +1538,24 @@ impl SystemSpecs {
             let addr = line.split_whitespace().next().unwrap_or("");
             let integrated = addr.ends_with(":00:02.0") || addr == "00:02.0";
             if integrated {
+                let tdp = gpu_tdp_watts(&name);
                 gpus.push(GpuInfo {
                     name: format!("{name} (integrated)"),
                     vram_gb: Some(total_ram_gb),
                     backend: GpuBackend::Sycl,
                     count: 1,
                     unified_memory: true,
+                    tdp_watts: tdp,
                 });
             } else {
+                let tdp = gpu_tdp_watts(&name);
                 gpus.push(GpuInfo {
                     name,
                     vram_gb: dgpu_vram_gb(addr),
                     backend: GpuBackend::Sycl,
                     count: 1,
                     unified_memory: false,
+                    tdp_watts: tdp,
                 });
             }
         }
@@ -1704,12 +1728,21 @@ impl SystemSpecs {
                     .and_then(|v| v.as_str())
                     .and_then(parse_memory_size);
 
+                let vram_gb = entry
+                    .get("spdisplays_vram")
+                    .or_else(|| entry.get("_spdisplays_vram"))
+                    .or_else(|| entry.get("spdisplays_vram_shared"))
+                    .and_then(|v| v.as_str())
+                    .and_then(parse_memory_size);
+
+                let tdp = gpu_tdp_watts(&name);
                 Some(GpuInfo {
                     name,
                     vram_gb,
                     backend: GpuBackend::Metal,
                     count: 1,
                     unified_memory: false,
+                    tdp_watts: tdp,
                 })
             })
             .collect()
@@ -1775,9 +1808,10 @@ impl SystemSpecs {
             .map(|(name, count)| GpuInfo {
                 backend: GpuBackend::Vulkan,
                 count,
-                name,
+                name: name.clone(),
                 unified_memory: false,
                 vram_gb: None,
+                tdp_watts: gpu_tdp_watts(&name),
             })
             .collect()
     }
@@ -2029,6 +2063,7 @@ impl SystemSpecs {
                     backend: GpuBackend::Ascend,
                     count: 1,
                     unified_memory: false,
+                    tdp_watts: gpu_tdp_watts(npu_name),
                 };
                 npu_infos.push(npu_info);
             }
@@ -2210,6 +2245,7 @@ impl SystemSpecs {
                 backend,
                 count: 1,
                 unified_memory: false,
+                tdp_watts: None,
             });
             self.has_gpu = true;
             self.gpu_vram_gb = Some(vram_gb);
@@ -3102,6 +3138,297 @@ pub fn gpu_memory_bandwidth_gbps(name: &str) -> Option<f64> {
     }
     if lower.contains("m1") {
         return Some(68.0);
+    }
+
+    None
+}
+
+/// GPU Thermal Design Power in watts, from vendor specifications.
+/// Returns `None` when the GPU is not recognized.
+///
+/// Values are nominal TDP (base power limit) from vendor specs.
+/// Actual power draw under load may exceed this with boost clocks.
+/// For energy estimation, we use TDP as an upper-bound proxy.
+pub fn gpu_tdp_watts(name: &str) -> Option<f64> {
+    let lower = name.to_lowercase();
+
+    // ── NVIDIA Consumer (GeForce) ──────────────────────────────────
+    // RTX 50 series (Blackwell)
+    if lower.contains("5090") {
+        return Some(600.0);
+    }
+    if lower.contains("5080") {
+        return Some(360.0);
+    }
+    if lower.contains("5070 ti") {
+        return Some(300.0);
+    }
+    if lower.contains("5070") {
+        return Some(250.0);
+    }
+    if lower.contains("5060 ti") {
+        return Some(180.0);
+    }
+    if lower.contains("5060") {
+        return Some(150.0);
+    }
+
+    // RTX 40 series (Ada Lovelace)
+    if lower.contains("4090") {
+        return Some(450.0);
+    }
+    if lower.contains("4080 super") {
+        return Some(320.0);
+    }
+    if lower.contains("4080") {
+        return Some(320.0);
+    }
+    if lower.contains("4070 ti super") {
+        return Some(285.0);
+    }
+    if lower.contains("4070 ti") {
+        return Some(285.0);
+    }
+    if lower.contains("4070 super") {
+        return Some(220.0);
+    }
+    if lower.contains("4070") {
+        return Some(200.0);
+    }
+    if lower.contains("4060 ti") {
+        return Some(160.0);
+    }
+    if lower.contains("4060") {
+        return Some(115.0);
+    }
+
+    // RTX 30 series (Ampere)
+    if lower.contains("3090 ti") {
+        return Some(480.0);
+    }
+    if lower.contains("3090") {
+        return Some(350.0);
+    }
+    if lower.contains("3080 ti") {
+        return Some(350.0);
+    }
+    if lower.contains("3080") {
+        return Some(320.0);
+    }
+    if lower.contains("3070 ti") {
+        return Some(290.0);
+    }
+    if lower.contains("3070") {
+        return Some(220.0);
+    }
+    if lower.contains("3060 ti") {
+        return Some(200.0);
+    }
+    if lower.contains("3060") {
+        return Some(170.0);
+    }
+
+    // RTX 20 series (Turing)
+    if lower.contains("2080 ti") {
+        return Some(260.0);
+    }
+    if lower.contains("2080 super") {
+        return Some(250.0);
+    }
+    if lower.contains("2080") {
+        return Some(215.0);
+    }
+    if lower.contains("2070 super") {
+        return Some(215.0);
+    }
+    if lower.contains("2070") {
+        return Some(175.0);
+    }
+    if lower.contains("2060 super") {
+        return Some(175.0);
+    }
+    if lower.contains("2060") {
+        return Some(160.0);
+    }
+
+    // ── NVIDIA Professional / Data Center ──────────────────────────
+    if lower.contains("h100") || lower.contains("hopper") {
+        return Some(700.0); // SXM5
+    }
+    if lower.contains("h200") {
+        return Some(700.0);
+    }
+    if lower.contains("a100") {
+        return Some(400.0); // SXM4 40GB
+    }
+    if lower.contains("a800") {
+        return Some(400.0);
+    }
+    if lower.contains("v100") {
+        return Some(300.0);
+    }
+    if lower.contains("t4") {
+        return Some(70.0);
+    }
+    if lower.contains("a10") || lower.contains("a10g") {
+        return Some(150.0);
+    }
+    if lower.contains("a40") {
+        return Some(300.0);
+    }
+    if lower.contains("a30") {
+        return Some(165.0);
+    }
+    if lower.contains("l40") {
+        return Some(300.0);
+    }
+    if lower.contains("l4") {
+        return Some(72.0);
+    }
+    if lower.contains("rtx 6000 ada") {
+        return Some(300.0);
+    }
+    if lower.contains("rtx 5000 ada") {
+        return Some(250.0);
+    }
+    if lower.contains("rtx 4000 ada") {
+        return Some(210.0);
+    }
+    if lower.contains("rtx a6000") {
+        return Some(300.0);
+    }
+    if lower.contains("rtx a5000") {
+        return Some(230.0);
+    }
+    if lower.contains("rtx a4000") {
+        return Some(140.0);
+    }
+    if lower.contains("rtx a2000") {
+        return Some(70.0);
+    }
+
+    // ── AMD Consumer (Radeon) ──────────────────────────────────────
+    // RX 7000 series (RDNA 3)
+    if lower.contains("7900 xtx") {
+        return Some(355.0);
+    }
+    if lower.contains("7900 xt") {
+        return Some(315.0);
+    }
+    if lower.contains("7900 gre") {
+        return Some(260.0);
+    }
+    if lower.contains("7800 xt") {
+        return Some(263.0);
+    }
+    if lower.contains("7700 xt") {
+        return Some(245.0);
+    }
+    if lower.contains("7600") {
+        return Some(165.0);
+    }
+
+    // RX 6000 series (RDNA 2)
+    if lower.contains("6950 xt") {
+        return Some(335.0);
+    }
+    if lower.contains("6900 xt") {
+        return Some(300.0);
+    }
+    if lower.contains("6800 xt") {
+        return Some(300.0);
+    }
+    if lower.contains("6800") {
+        return Some(250.0);
+    }
+    if lower.contains("6700 xt") {
+        return Some(230.0);
+    }
+    if lower.contains("6600 xt") {
+        return Some(160.0);
+    }
+    if lower.contains("6600") {
+        return Some(132.0);
+    }
+
+    // AMD Data Center (CDNA)
+    if lower.contains("mi300x") {
+        return Some(750.0);
+    }
+    if lower.contains("mi300") {
+        return Some(750.0);
+    }
+    if lower.contains("mi250x") {
+        return Some(560.0);
+    }
+    if lower.contains("mi250") {
+        return Some(500.0);
+    }
+    if lower.contains("mi210") {
+        return Some(300.0);
+    }
+    if lower.contains("mi100") {
+        return Some(300.0);
+    }
+
+    // ── Apple Silicon (unified memory — SoC package power) ─────────
+    // Note: These are approximate SoC package power, not GPU-only.
+    if lower.contains("m5 max") {
+        return Some(60.0);
+    }
+    if lower.contains("m5 pro") {
+        return Some(35.0);
+    }
+    if lower.contains("m5") {
+        return Some(20.0);
+    }
+    if lower.contains("m4 ultra") {
+        return Some(120.0);
+    }
+    if lower.contains("m4 max") {
+        return Some(70.0);
+    }
+    if lower.contains("m4 pro") {
+        return Some(40.0);
+    }
+    if lower.contains("m4") {
+        return Some(25.0);
+    }
+    if lower.contains("m3 ultra") {
+        return Some(100.0);
+    }
+    if lower.contains("m3 max") {
+        return Some(70.0);
+    }
+    if lower.contains("m3 pro") {
+        return Some(40.0);
+    }
+    if lower.contains("m3") {
+        return Some(30.0);
+    }
+    if lower.contains("m2 ultra") {
+        return Some(90.0);
+    }
+    if lower.contains("m2 max") {
+        return Some(60.0);
+    }
+    if lower.contains("m2 pro") {
+        return Some(35.0);
+    }
+    if lower.contains("m2") {
+        return Some(25.0);
+    }
+    if lower.contains("m1 ultra") {
+        return Some(80.0);
+    }
+    if lower.contains("m1 max") {
+        return Some(60.0);
+    }
+    if lower.contains("m1 pro") {
+        return Some(35.0);
+    }
+    if lower.contains("m1") {
+        return Some(20.0);
     }
 
     None
@@ -4577,6 +4904,7 @@ GPU id = 1 (NVIDIA GeForce RTX 4090)
                 backend: super::GpuBackend::Cuda,
                 count: 1,
                 unified_memory: false,
+                tdp_watts: None,
             }],
             cluster_mode: false,
             cluster_node_count: 0,
@@ -5029,6 +5357,7 @@ GPU id = 1 (NVIDIA GeForce RTX 4090)
                 backend: GpuBackend::Vulkan,
                 count: 1,
                 unified_memory: false,
+                tdp_watts: None,
             },
             super::GpuInfo {
                 name: "NVIDIA GeForce RTX 4090".to_string(),
@@ -5036,6 +5365,7 @@ GPU id = 1 (NVIDIA GeForce RTX 4090)
                 backend: GpuBackend::Cuda,
                 count: 1,
                 unified_memory: false,
+                tdp_watts: None,
             },
         ];
         let result = SystemSpecs::prefer_discrete_gpus(gpus);
@@ -5052,6 +5382,7 @@ GPU id = 1 (NVIDIA GeForce RTX 4090)
             backend: GpuBackend::Vulkan,
             count: 1,
             unified_memory: false,
+            tdp_watts: None,
         }];
         let result = SystemSpecs::prefer_discrete_gpus(gpus);
         assert_eq!(result.len(), 1);
@@ -5148,6 +5479,7 @@ GPU id = 1 (NVIDIA GeForce RTX 4090)
                 backend: super::GpuBackend::Cuda,
                 count: 1,
                 unified_memory: false,
+                tdp_watts: None,
             }],
             cluster_mode: false,
             cluster_node_count: 0,
@@ -5183,6 +5515,7 @@ GPU id = 1 (NVIDIA GeForce RTX 4090)
                 backend: super::GpuBackend::Metal,
                 count: 1,
                 unified_memory: true,
+                tdp_watts: Some(60.0),
             }],
             cluster_mode: false,
             cluster_node_count: 0,
@@ -5721,6 +6054,7 @@ GPU[2]\t\t: GFX Version: \t\tgfx90c
             backend: GpuBackend::Rocm,
             count: 1,
             unified_memory: false,
+            tdp_watts: None,
         };
         let gpus = vec![
             mk("AMD Radeon Graphics", 32.0), // mislabeled MI50-class accelerator

@@ -1441,6 +1441,8 @@ mod tests {
             estimate_basis: Default::default(),
             measured_tps: None,
             tps_range: None,
+            energy_per_token_wh: None,
+            energy_per_mtok_usd: None,
         }
     }
 

@@ -180,6 +180,7 @@ mod tests {
                 backend: GpuBackend::Cuda,
                 count: 1,
                 unified_memory: false,
+                tdp_watts: None,
             }],
             cluster_mode: false,
             cluster_node_count: 0,

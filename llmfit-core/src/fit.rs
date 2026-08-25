@@ -66,6 +66,11 @@ pub struct CalcConfig {
     /// Tensor parallel size for vLLM serving (V2-d). None = auto (1).
     #[serde(default)]
     pub tensor_parallel_size: Option<u32>,
+    /// Electricity price in $/kWh for cost estimation (V3-a).
+    /// Defaults to US average residential rate (~$0.15/kWh).
+    /// Set to None to disable cost display.
+    #[serde(default = "default_electricity_price")]
+    pub electricity_price_usd_per_kwh: Option<f64>,
 }
 
 impl Default for CalcConfig {
@@ -82,8 +87,13 @@ impl Default for CalcConfig {
             serving_max_num_seqs: None,
             serving_paged_overhead_fraction: default_paged_overhead_fraction(),
             tensor_parallel_size: None,
+            electricity_price_usd_per_kwh: default_electricity_price(),
         }
     }
+}
+
+fn default_electricity_price() -> Option<f64> {
+    Some(0.15) // US average residential $/kWh
 }
 
 fn default_efficiency() -> f64 {
@@ -290,6 +300,12 @@ pub struct EstimateBasis {
     /// already applied to `estimated_tps`. `None` when no local runs matched.
     #[serde(default)]
     pub local_calibration: Option<f64>,
+    /// Estimated energy per token in Wh (V3-a).
+    #[serde(default)]
+    pub energy_per_token_wh: Option<f64>,
+    /// Estimated energy cost per 1M tokens in USD (V3-a).
+    #[serde(default)]
+    pub energy_per_mtok_usd: Option<f64>,
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -329,6 +345,10 @@ pub struct ModelFit {
     /// p10–p90 when enough comparable runs exist, otherwise an empirical
     /// ±25 % band around the estimate.
     pub tps_range: Option<TpsRange>,
+    /// Estimated energy per token in Wh (V3-a).
+    pub energy_per_token_wh: Option<f64>,
+    /// Estimated energy cost per 1M tokens in USD (V3-a).
+    pub energy_per_mtok_usd: Option<f64>,
 }
 
 /// Where a throughput interval comes from, and therefore how much to trust it.
@@ -512,6 +532,8 @@ impl ModelFit {
                 },
                 measured_tps: None,
                 tps_range: None,
+                energy_per_token_wh: None,
+                energy_per_mtok_usd: None,
             };
         }
 
@@ -775,6 +797,43 @@ impl ModelFit {
                         .total_gpu_vram_gb
                         .map(|raw| vram_reserve_components(raw, system, &config).1)
                 },
+                // Energy/cost estimation (V3-a)
+                energy_per_token_wh: {
+                    let price = config.electricity_price_usd_per_kwh;
+                    let tdp = system
+                        .gpus
+                        .iter()
+                        .find(|g| g.tdp_watts.is_some())
+                        .and_then(|g| g.tdp_watts);
+                    if estimated_tps > 0.0 && price.is_some() && tdp.is_some() {
+                        let price = price.unwrap();
+                        let tdp = tdp.unwrap();
+                        let sec_per_token = 1.0 / estimated_tps.max(0.1);
+                        const UTIL_FACTOR: f64 = 0.75;
+                        let wh = tdp * sec_per_token * UTIL_FACTOR / 3600.0;
+                        Some(wh)
+                    } else {
+                        None
+                    }
+                },
+                energy_per_mtok_usd: {
+                    let price = config.electricity_price_usd_per_kwh;
+                    let tdp = system
+                        .gpus
+                        .iter()
+                        .find(|g| g.tdp_watts.is_some())
+                        .and_then(|g| g.tdp_watts);
+                    if estimated_tps > 0.0 && price.is_some() && tdp.is_some() {
+                        let price = price.unwrap();
+                        let tdp = tdp.unwrap();
+                        let sec_per_token = 1.0 / estimated_tps.max(0.1);
+                        const UTIL_FACTOR: f64 = 0.75;
+                        let wh = tdp * sec_per_token * UTIL_FACTOR / 3600.0;
+                        Some(wh * price * 1000.0)
+                    } else {
+                        None
+                    }
+                },
                 efficiency: config.efficiency,
                 assumed_context: estimation_ctx,
                 local_calibration: None,
@@ -878,6 +937,49 @@ impl ModelFit {
             // Default band around the formula estimate; annotation sites
             // refresh it via `set_tps_range()` once a measurement is known.
             tps_range: Some(TpsRange::empirical(estimated_tps)),
+            // Energy/cost estimation (V3-a)
+            energy_per_token_wh: {
+                let (price, tdp) = match (
+                    config.electricity_price_usd_per_kwh,
+                    system
+                        .gpus
+                        .iter()
+                        .find(|g| g.tdp_watts.is_some())
+                        .and_then(|g| g.tdp_watts),
+                ) {
+                    (Some(p), Some(t)) => (Some(p), Some(t)),
+                    _ => (None, None),
+                };
+                if estimated_tps > 0.0 && price.is_some() && tdp.is_some() {
+                    let sec_per_token = 1.0 / estimated_tps.max(0.1);
+                    const UTIL_FACTOR: f64 = 0.75;
+                    let wh = tdp.unwrap() * sec_per_token * UTIL_FACTOR / 3600.0;
+                    Some(wh)
+                } else {
+                    None
+                }
+            },
+            energy_per_mtok_usd: {
+                let (price, tdp) = match (
+                    config.electricity_price_usd_per_kwh,
+                    system
+                        .gpus
+                        .iter()
+                        .find(|g| g.tdp_watts.is_some())
+                        .and_then(|g| g.tdp_watts),
+                ) {
+                    (Some(p), Some(t)) => (Some(p), Some(t)),
+                    _ => (None, None),
+                };
+                if estimated_tps > 0.0 && price.is_some() && tdp.is_some() {
+                    let sec_per_token = 1.0 / estimated_tps.max(0.1);
+                    const UTIL_FACTOR: f64 = 0.75;
+                    let wh = tdp.unwrap() * sec_per_token * UTIL_FACTOR / 3600.0;
+                    Some(wh * price.unwrap() * 1000.0)
+                } else {
+                    None
+                }
+            },
         }
     }
 
@@ -3275,6 +3377,7 @@ mod tests {
                 backend,
                 count: 1,
                 unified_memory: unified,
+                tdp_watts: None,
             }],
             cluster_mode: false,
             cluster_node_count: 0,
