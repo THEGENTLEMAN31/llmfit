@@ -19,32 +19,6 @@ function MetricBar({ label, value }) {
   );
 }
 
-function HardwareEstimateCard({ title, estimate, t }) {
-  return (
-    <div className="plan-summary-card">
-      <h5>{title}</h5>
-      <dl className="plan-summary-list">
-        <div>
-          <dt>{t('plan.summary.vram')}</dt>
-          <dd>
-            {typeof estimate?.vram_gb === 'number'
-              ? `${round(estimate.vram_gb, 1)} GB`
-              : t('plan.summary.notRequired')}
-          </dd>
-        </div>
-        <div>
-          <dt>{t('plan.summary.ram')}</dt>
-          <dd>{typeof estimate?.ram_gb === 'number' ? `${round(estimate.ram_gb, 1)} GB` : '\u2014'}</dd>
-        </div>
-        <div>
-          <dt>{t('plan.summary.cpuCores')}</dt>
-          <dd>{typeof estimate?.cpu_cores === 'number' ? estimate.cpu_cores : '\u2014'}</dd>
-        </div>
-      </dl>
-    </div>
-  );
-}
-
 function translatePlanPath(t, path) {
   return t(`plan.paths.${path}`);
 }
@@ -521,6 +495,8 @@ export default function DetailPanel() {
           </div>
         </div>
       </div>
+
+      <CalibrationCard t={t} measured={selectedModel.measured_tps} estimated={selectedModel.estimated_tps} />
 
       {Array.isArray(selectedModel.notes) && selectedModel.notes.length > 0 ? (
         <div className="metrics-card">

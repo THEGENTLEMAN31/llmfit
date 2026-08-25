@@ -299,6 +299,24 @@ const en = {
   },
   test: {
     fallbackOnly: 'Fallback only'
+  },
+  calibration: {
+    title: 'Calibration',
+    measured: 'Measured',
+    estimated: 'Estimated',
+    band: 'p10–p90: {p10}–{p90} tok/s',
+    accuracy: {
+      overestimated: 'overestimated',
+      underestimated: 'underestimated'
+    },
+    samples: 'Samples',
+    source: 'Source',
+    sourceLocal: 'Local run',
+    sourceCommunity: 'Community',
+    hardware: 'Hardware',
+    unknownHardware: 'Unknown hardware',
+    overestimated: 'overestimated',
+    underestimated: 'underestimated'
   }
 };
 

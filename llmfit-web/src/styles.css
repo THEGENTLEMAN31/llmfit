@@ -1141,3 +1141,153 @@ tbody tr.selected {
     transform: translateY(-10px);
   }
 }
+
+.calibration-card {
+  border-left: 3px solid var(--accent);
+}
+
+.calibration-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1rem;
+  align-items: start;
+}
+
+.calibration-main {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.calibration-comparison {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1rem;
+}
+
+.calibration-value {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  padding: 0.75rem;
+  background: color-mix(in oklab, var(--accent) 8%, transparent);
+  border-radius: 8px;
+  border: 1px solid var(--line);
+}
+
+.calibration-value.measured {
+  background: color-mix(in oklab, var(--good) 10%, transparent);
+  border-color: var(--good);
+}
+
+.calibration-value.estimated {
+  background: color-mix(in oklab, var(--accent) 8%, transparent);
+  border-color: var(--accent);
+}
+
+.calibration-label {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+}
+
+.calibration-value-number {
+  font-size: 1.25rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.calibration-value.measured .calibration-value-number {
+  color: var(--good);
+}
+
+.calibration-value.estimated .calibration-value-number {
+  color: var(--accent);
+}
+
+.calibration-band {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  margin-top: 0.25rem;
+}
+
+.calibration-accuracy {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.75rem;
+  background: color-mix(in oklab, var(--accent) 6%, transparent);
+  border-radius: 8px;
+  border: 1px solid var(--line);
+}
+
+.calibration-accuracy-value {
+  font-size: 1.5rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.calibration-accuracy-value.positive {
+  color: var(--good);
+}
+
+.calibration-accuracy-value.negative {
+  color: var(--error);
+}
+
+.calibration-accuracy-label {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+.calibration-meta {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 1rem;
+  padding-top: 0.5rem;
+  border-top: 1px solid var(--line);
+}
+
+.calibration-meta-item {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  text-align: center;
+}
+
+.calibration-meta-label {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+}
+
+.calibration-meta-value {
+  font-size: 0.85rem;
+  font-weight: 500;
+}
+
+.calibration-meta-value.local {
+  color: var(--accent);
+}
+
+.calibration-meta-value.community {
+  color: var(--text);
+}
+
+@media (max-width: 780px) {
+  .calibration-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .calibration-comparison {
+    grid-template-columns: 1fr;
+  }
+
+  .calibration-meta {
+    grid-template-columns: 1fr;
+  }
+}

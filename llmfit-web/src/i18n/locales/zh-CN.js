@@ -296,6 +296,24 @@ const zhCN = {
       multimodal: '多模态',
       embedding: '向量嵌入'
     }
+  },
+  calibration: {
+    title: '校准',
+    measured: '实测',
+    estimated: '估计',
+    band: 'p10–p90: {p10}–{p90} tok/s',
+    accuracy: {
+      overestimated: '高估',
+      underestimated: '低估'
+    },
+    samples: '样本数',
+    source: '来源',
+    sourceLocal: '本地运行',
+    sourceCommunity: '社区数据',
+    hardware: '硬件',
+    unknownHardware: '未知硬件',
+    overestimated: '高估',
+    underestimated: '低估'
   }
 };
 
