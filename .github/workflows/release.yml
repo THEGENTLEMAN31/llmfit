@@ -17,12 +17,16 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
+            artifact_name: llmfit-linux-x86_64
           - target: x86_64-apple-darwin
             os: macos-latest
+            artifact_name: llmfit-macos-x86_64
           - target: aarch64-apple-darwin
             os: macos-latest
+            artifact_name: llmfit-macos-arm64
           - target: x86_64-pc-windows-gnu
             os: windows-latest
+            artifact_name: llmfit-windows-x86_64.exe
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust
@@ -31,13 +35,26 @@ jobs:
           target: ${{ matrix.target }}
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
-      - name: Build
+      - name: Build (Linux/macOS)
+        if: runner.os != 'Windows'
         run: cargo build --release --target ${{ matrix.target }}
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
+        run: cargo build --release --target ${{ matrix.target }}
+      - name: Rename binary
+        run: |
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cp target/${{ matrix.target }}/release/llmfit.exe "dist/${{ matrix.artifact_name }}"
+          else
+            cp target/${{ matrix.target }}/release/llmfit "dist/${{ matrix.artifact_name }}"
+            chmod +x "dist/${{ matrix.artifact_name }}"
+          fi
+        shell: bash
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: llmfit-${{ matrix.target }}
-          path: target/${{ matrix.target }}/release/llmfit*
+          name: ${{ matrix.artifact_name }}
+          path: dist/${{ matrix.artifact_name }}
 
   release:
     name: Create Release
@@ -47,22 +64,58 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           pattern: llmfit-*
-          merge-multiple: true
           path: dist
-      - name: Prepare assets
+      - name: Prepare release assets
         run: |
           cd dist
-          for f in *; do
-            if [[ "$f" == *.exe ]]; then
-              mv "$f" "llmfit-${f%.exe}.exe"
-            else
-              mv "$f" "llmfit-$f"
-            fi
-          done
-          sha256sum * > SHA256SUMS
+          find . -name '*.d' -delete
+          sha256sum llmfit-* > SHA256SUMS
           cat SHA256SUMS
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*
           generate_release_notes: true
+          body: |
+            ## Install
+
+            **Docker**
+            ```sh
+            docker pull thegentleman31/llmfit-x:latest
+            docker run --rm -it thegentleman31/llmfit-x:latest
+            ```
+
+            **crates.io**
+            ```sh
+            cargo install llmfit-x
+            ```
+
+            **Homebrew**
+            ```sh
+            brew install thegentleman31/llmfit/llmfit
+            ```
+
+            **Binary download** — pick your platform from the assets below, then:
+            ```sh
+            # Linux / macOS
+            chmod +x llmfit-*
+            ./llmfit-linux-x86_64 --cli
+
+            # Windows
+            .\llmfit-windows-x86_64.exe --cli
+            ```
+
+            **Verify checksum**
+            ```sh
+            sha256sum -c SHA256SUMS
+            ```
+
+            ## What's new in v1.2.0
+
+            - **Rename**: crate published as `llmfit-x` (binary stays `llmfit`)
+            - **69 models corrected** with accurate parameter counts
+            - **Scraper fix**: auto-corrects quantized model params from upstream HF tags
+            - **Docker Hub**: `thegentleman31/llmfit-x:latest`
+            - **GHCR**: `ghcr.io/THEGENTLEMAN31/llmfit-x:latest`
+
+            See [MIGRATION_V3.md](https://github.com/THEGENTLEMAN31/llmfit/blob/main/MIGRATION_V3.md) for full details.
