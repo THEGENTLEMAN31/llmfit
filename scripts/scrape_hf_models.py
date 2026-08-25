@@ -662,6 +662,41 @@ def estimate_params_from_arch(config: dict | None) -> int | None:
     return total if total > 1_000_000 else None
 
 
+def correct_quantized_params(
+    total_params: int,
+    tags: list,
+    full_config: dict | None,
+    repo_id: str,
+) -> int:
+    """Fix parameter count when safetensors reports quantized element counts.
+
+    AWQ/GPTQ/F8 repos store packed low-bit values, so ``safetensors.total``
+    vastly undercounts the true parameter count.  This function applies two
+    correction layers:
+
+    1. **Base-model tag lookup** — the most reliable signal.  If the repo has
+       a ``base_model:*`` tag pointing to an upstream model, inherit its param
+       count.
+    2. **Architecture estimate** — compute from hidden_size / layers / vocab.
+       Used when base-model tags are absent or the upstream also reports
+       quantized counts.
+
+    A correction fires only when the candidate is significantly larger than
+    ``total_params`` (> 15 %) to avoid false positives on genuine small models.
+    """
+    # --- 1. Base-model tag lookup (most reliable) ---
+    upstream_params = _upstream_params_from_tags(tags)
+    if upstream_params and upstream_params > total_params * 1.15:
+        return upstream_params
+
+    # --- 2. Architecture-based estimate ---
+    arch_params = estimate_params_from_arch(full_config)
+    if arch_params and arch_params > total_params * 1.5:
+        return arch_params
+
+    return total_params
+
+
 def infer_use_case(repo_id: str, pipeline_tag: str | None, config: dict | None) -> str:
     """Infer a brief use-case description from model metadata."""
     rid = repo_id.lower()
@@ -989,9 +1024,8 @@ def scrape_model(repo_id: str) -> dict | None:
 
     # Correct parameters_raw when safetensors reports quantized element counts
     # instead of true parameter count (common in FP8/INT4/INT8 repos).
-    arch_params = estimate_params_from_arch(full_config)
-    if arch_params and arch_params > total_params * 2:
-        total_params = arch_params
+    tags = info.get("tags", [])
+    total_params = correct_quantized_params(total_params, tags, full_config, repo_id)
 
     min_ram, rec_ram = estimate_ram(total_params, default_quant)
     min_vram = estimate_vram(total_params, default_quant)
@@ -1160,6 +1194,26 @@ def _base_models_from_tags(tags: list) -> list[str]:
 
 _REPO_PARAMS_CACHE: dict[str, int | None] = {}
 _MIRROR_PARAMS_TOLERANCE = 0.30
+_UPSTREAM_PARAMS_TOLERANCE = 0.15  # 15% margin: upstream must be >15% larger
+
+
+def _upstream_params_from_tags(tags: list) -> int | None:
+    """Look up the upstream model's true parameter count from base_model tags.
+
+    Quant repos carry tags like ``base_model:Qwen/Qwen3-8-27B``.  The upstream
+    model's ``safetensors.total`` reflects the *real* parameter count (not the
+    quantized element count), so it serves as a reliable ground truth.
+
+    Returns the upstream param count if found and >1 M, else ``None``.
+    """
+    bases = _base_models_from_tags(tags)
+    for base_id in bases:
+        # _base_models_from_tags lowercases; restore mixed case is impossible,
+        # but HF repo lookups are case-insensitive so this is fine.
+        params = _repo_total_params(base_id)
+        if params and params > 1_000_000:
+            return params
+    return None
 
 
 def _repo_total_params(repo_id: str) -> int | None:
@@ -1698,9 +1752,8 @@ def _build_discovered_model(listing: dict) -> dict | None:
     )
 
     # Correct parameters_raw when safetensors reports quantized element counts
-    arch_params = estimate_params_from_arch(full_config)
-    if arch_params and arch_params > total_params * 2:
-        total_params = arch_params
+    tags = listing.get("tags", [])
+    total_params = correct_quantized_params(total_params, tags, full_config, repo_id)
 
     min_ram, rec_ram = estimate_ram(total_params, default_quant)
     min_vram = estimate_vram(total_params, default_quant)
