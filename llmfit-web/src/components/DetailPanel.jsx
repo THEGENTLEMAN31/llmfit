@@ -19,6 +19,103 @@ function MetricBar({ label, value }) {
   );
 }
 
+
+
+
+function HardwareEstimateCard({ title, estimate, t }) {
+  return (
+    <div className="plan-summary-card">
+      <h5>{title}</h5>
+      <dl className="plan-summary-list">
+        <div>
+          <dt>{t('plan.summary.vram')}</dt>
+          <dd>
+            {typeof estimate?.vram_gb === 'number'
+              ? `${round(estimate.vram_gb, 1)} GB`
+              : t('plan.summary.notRequired')}
+          </dd>
+        </div>
+        <div>
+          <dt>{t('plan.summary.ram')}</dt>
+          <dd>{typeof estimate?.ram_gb === 'number' ? `${round(estimate.ram_gb, 1)} GB` : '—'}</dd>
+        </div>
+        <div>
+          <dt>{t('plan.summary.cpuCores')}</dt>
+          <dd>{typeof estimate?.cpu_cores === 'number' ? estimate.cpu_cores : '—'}</dd>
+        </div>
+      </dl>
+    </div>
+  );
+}
+
+function CalibrationCard({ t, measured, estimated }) {
+  if (!measured || measured.tok_s === undefined || measured.tok_s === null) {
+    return null;
+  }
+
+  const estimatedValue = measured.estimated_tps ?? 0;
+  const measuredTps = measured.tok_s;
+  const sampleCount = measured.sample_count ?? 0;
+  const hardwareLabel = measured.hardware_label ?? t('calibration.unknownHardware');
+  const source = measured.source ?? 'community';
+  const p10 = measured.p10 ?? measured.tok_s;
+  const p90 = measured.p90 ?? measured.tok_s;
+  const isLocal = measured.source === 'local';
+
+  const accuracy = estimated > 0 ? ((measured.tok_s / estimated - 1) * 100) : 0;
+
+  return (
+    <div className="metrics-card calibration-card">
+      <h4>{t('calibration.title')}</h4>
+      <div className="calibration-grid">
+        <div className="calibration-main">
+          <div className="calibration-comparison">
+            <div className="calibration-value measured">
+              <span className="calibration-label">{t('calibration.measured')}</span>
+              <span className="calibration-value-number">{round(measured.tok_s, 1)} tok/s</span>
+              {measured.p10 !== undefined && measured.p90 !== undefined && (
+                <span className="calibration-band">
+                  {t('calibration.band', { p10: round(p10, 1), p90: round(p90, 1) })}
+                </span>
+              )}
+            </div>
+            <div className="calibration-value estimated">
+              <span className="calibration-label">{t('calibration.estimated')}</span>
+              <span className="calibration-value-number">{round(estimated, 1)} tok/s</span>
+            </div>
+          </div>
+          <div className="calibration-accuracy">
+            <span className={`calibration-accuracy-value ${accuracy >= 0 ? 'positive' : 'negative'}`}>
+              {accuracy >= 0 ? '+' : ''}{round(accuracy, 1)}%
+            </span>
+            <span className="calibration-accuracy-label">
+              {accuracy >= 0
+                ? t('calibration.overestimated')
+                : t('calibration.underestimated')}
+            </span>
+          </div>
+        </div>
+        <div className="calibration-meta">
+          <div className="calibration-meta-item">
+            <span className="calibration-meta-label">{t('calibration.samples')}</span>
+            <span className="calibration-meta-value">{sampleCount}</span>
+          </div>
+          <div className="calibration-meta-item">
+            <span className="calibration-meta-label">{t('calibration.source')}</span>
+            <span className={`calibration-meta-value ${isLocal ? 'local' : 'community'}`}>
+              {isLocal ? t('calibration.sourceLocal') : t('calibration.sourceCommunity')}
+            </span>
+          </div>
+          <div className="calibration-meta-item">
+            <span className="calibration-meta-label">{t('calibration.hardware')}</span>
+            <span className="calibration-meta-value">{hardwareLabel}</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function translatePlanPath(t, path) {
   return t(`plan.paths.${path}`);
 }
