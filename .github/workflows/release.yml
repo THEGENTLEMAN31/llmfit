@@ -66,6 +66,7 @@ jobs:
         with:
           pattern: llmfit-*
           path: dist
+          merge-multiple: true
       - name: Prepare release assets
         run: |
           cd dist
