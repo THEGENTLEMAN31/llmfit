@@ -1,20 +1,33 @@
 name: Deploy Docs
 
 on:
-  push:
-    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
 
 jobs:
   docs:
     runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@stable
       - name: Generate docs
-        run: cargo doc --workspace --no-deps --document-private-items
-      - name: Deploy to GitHub Pages
-        uses: peaceiris/actions-gh-pages@v3
+        run: cargo doc --workspace --no-deps
+        env:
+          RUSTDOCFLAGS: "--cfg docsrs"
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
         with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: target/doc
+          path: target/doc
+      - id: deployment
+        uses: actions/deploy-pages@v4
