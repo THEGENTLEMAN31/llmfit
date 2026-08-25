@@ -1,5 +1,5 @@
 [package]
-name = "llmfit"
+name = "llmfit-x"
 version.workspace = true
 edition = "2024"
 build = "build.rs"

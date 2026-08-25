@@ -2685,7 +2685,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
 
 [[package]]
-name = "llmfit"
+name = "llmfit-desktop"
+version = "1.2.0"
+dependencies = [
+ "llmfit-x-core",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+]
+
+[[package]]
+name = "llmfit-x"
 version = "1.2.0"
 dependencies = [
  "arboard",
@@ -2709,17 +2720,6 @@ dependencies = [
  "tower",
  "unicode-segmentation",
  "unicode-width",
-]
-
-[[package]]
-name = "llmfit-desktop"
-version = "1.2.0"
-dependencies = [
- "llmfit-x-core",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
 ]
 
 [[package]]
