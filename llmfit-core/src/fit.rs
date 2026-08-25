@@ -131,29 +131,29 @@ impl Default for RunModeFactors {
 
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct ScoringWeights {
-    /// (quality_weight, speed_weight, fit_weight, context_weight) per use case,
+    /// (quality, speed, fit, context, energy, cost) per use case,
     /// stored in the same order as `UseCase` variants.
     /// Order: General, Coding, Reasoning, Chat, Multimodal, Embedding
-    pub weights: [[f64; 4]; 6],
+    pub weights: [[f64; 6]; 6],
 }
 
 impl Default for ScoringWeights {
     fn default() -> Self {
         Self {
             weights: [
-                [0.45, 0.30, 0.15, 0.10], // General
-                [0.50, 0.20, 0.15, 0.15], // Coding
-                [0.55, 0.15, 0.15, 0.15], // Reasoning
-                [0.40, 0.35, 0.15, 0.10], // Chat
-                [0.50, 0.20, 0.15, 0.15], // Multimodal
-                [0.30, 0.40, 0.20, 0.10], // Embedding
+                [0.35, 0.25, 0.10, 0.10, 0.10, 0.10], // General
+                [0.40, 0.15, 0.10, 0.10, 0.15, 0.10], // Coding
+                [0.45, 0.10, 0.10, 0.10, 0.15, 0.10], // Reasoning
+                [0.35, 0.25, 0.10, 0.10, 0.10, 0.10], // Chat
+                [0.40, 0.15, 0.10, 0.10, 0.15, 0.10], // Multimodal
+                [0.25, 0.30, 0.15, 0.10, 0.10, 0.10], // Embedding
             ],
         }
     }
 }
 
 impl ScoringWeights {
-    pub fn get(&self, use_case: UseCase) -> (f64, f64, f64, f64) {
+    pub fn get(&self, use_case: UseCase) -> (f64, f64, f64, f64, f64, f64) {
         let idx = match use_case {
             UseCase::General => 0,
             UseCase::Coding => 1,
@@ -163,7 +163,7 @@ impl ScoringWeights {
             UseCase::Embedding => 5,
         };
         let w = self.weights[idx];
-        (w[0], w[1], w[2], w[3])
+        (w[0], w[1], w[2], w[3], w[4], w[5])
     }
 }
 
@@ -262,6 +262,10 @@ pub struct ScoreComponents {
     pub fit: f64,
     /// Context: context window capability vs reasonable target.
     pub context: f64,
+    /// Energy efficiency: lower Wh/token is better (0-100, higher = more efficient).
+    pub energy: f64,
+    /// Cost efficiency: lower $/Mtok is better (0-100, higher = more cost-effective).
+    pub cost: f64,
 }
 
 /// The inputs behind `estimated_tps`, exposed so users can see exactly what
@@ -517,6 +521,8 @@ impl ModelFit {
                     speed: 0.0,
                     fit: 0.0,
                     context: 0.0,
+                    energy: 0.0,
+                    cost: 0.0,
                 },
                 estimated_tps: 0.0,
                 best_quant: model.quantization.clone(),
@@ -869,6 +875,8 @@ impl ModelFit {
             estimated_tps,
             mem_required,
             mem_available,
+            system,
+            &config,
         );
         let score = weighted_score(score_components, use_case, &config);
 
@@ -2127,7 +2135,7 @@ impl RunModeFactors {
 }
 
 // ────────────────────────────────────────────────────────────────────
-// Multi-dimensional scoring (Quality, Speed, Fit, Context)
+// Multi-dimensional scoring (Quality, Speed, Fit, Context, Energy, Cost)
 // ────────────────────────────────────────────────────────────────────
 
 pub fn compute_scores(
@@ -2137,13 +2145,57 @@ pub fn compute_scores(
     estimated_tps: f64,
     mem_required: f64,
     mem_available: f64,
+    system: &SystemSpecs,
+    config: &CalcConfig,
 ) -> ScoreComponents {
     ScoreComponents {
         quality: quality_score(model, quant, use_case),
         speed: speed_score(estimated_tps, use_case),
         fit: fit_score(mem_required, mem_available),
         context: context_score(model, use_case),
+        energy: energy_score(estimated_tps, system),
+        cost: cost_score(system, &config),
     }
+}
+
+/// Energy efficiency score: lower Wh/token is better.
+/// Returns 0-100 where 100 = most efficient (lowest Wh/token).
+/// Uses the primary GPU's TDP if available, otherwise estimates from system.
+fn energy_score(estimated_tps: f64, system: &SystemSpecs) -> f64 {
+    if estimated_tps <= 0.0 {
+        return 0.0;
+    }
+    // Use primary GPU's TDP if available
+    let tdp = system
+        .gpus
+        .iter()
+        .find(|g| g.tdp_watts.is_some())
+        .and_then(|g| g.tdp_watts)
+        .unwrap_or(350.0); // fallback estimate
+
+    let wh_per_token = 0.75 * tdp / 3600.0 / estimated_tps.max(1.0);
+    let score = 100.0 * (-wh_per_token / 0.002).exp();
+    score.clamp(0.0, 100.0)
+}
+
+/// Cost efficiency score: lower $/Mtok is better.
+/// Returns 0-100 where 100 = most cost-effective (lowest $/Mtok).
+fn cost_score(system: &SystemSpecs, config: &CalcConfig) -> f64 {
+    let price = config.electricity_price_usd_per_kwh.unwrap_or(0.15);
+    let tdp = system
+        .gpus
+        .iter()
+        .find(|g| g.tdp_watts.is_some())
+        .and_then(|g| g.tdp_watts)
+        .unwrap_or(350.0);
+
+    let wh_per_token = 0.75 * tdp / 3600.0 / 10.0; // assume 10 tok/s baseline
+    let usd_per_mtok = wh_per_token * price * 1000.0;
+
+    // Score: 100 at $0.01/Mtok, ~50 at $0.05, ~20 at $0.20, ~5 at $1.00
+    // Score = 100 * exp(-$ / 0.1)
+    let score = 100.0 * (-usd_per_mtok / 0.1).exp();
+    score.clamp(0.0, 100.0)
 }
 
 /// Quality score: base quality from param count + family bump + quant penalty + task alignment.
@@ -2361,8 +2413,13 @@ fn context_score(model: &LlmModel, use_case: UseCase) -> f64 {
 /// Weighted composite score based on use-case category.
 /// Weights: [Quality, Speed, Fit, Context]
 pub fn weighted_score(sc: ScoreComponents, use_case: UseCase, config: &CalcConfig) -> f64 {
-    let (wq, ws, wf, wc) = config.scoring_weights.get(use_case);
-    let raw = sc.quality * wq + sc.speed * ws + sc.fit * wf + sc.context * wc;
+    let (wq, ws, wf, wc, we, wc2) = config.scoring_weights.get(use_case);
+    let raw = sc.quality * wq
+        + sc.speed * ws
+        + sc.fit * wf
+        + sc.context * wc
+        + sc.energy * we
+        + sc.cost * wc2;
     (raw * 10.0).round() / 10.0
 }
 
@@ -3235,11 +3292,14 @@ mod tests {
 
     #[test]
     fn test_weighted_score_composition() {
+        // Use components that will produce clearly different scores for different use cases
         let components = ScoreComponents {
-            quality: 80.0,
-            speed: 70.0,
-            fit: 90.0,
-            context: 100.0,
+            quality: 90.0,
+            speed: 80.0,
+            fit: 85.0,
+            context: 95.0,
+            energy: 60.0,
+            cost: 40.0,
         };
 
         // Different use cases should produce different scores
@@ -3253,7 +3313,18 @@ mod tests {
         assert!(embedding_score > 0.0 && embedding_score <= 100.0);
 
         // Scores should differ based on different weights
-        assert_ne!(general_score, embedding_score);
+        assert_ne!(
+            general_score, embedding_score,
+            "General and Embedding should differ"
+        );
+        assert_ne!(
+            general_score, coding_score,
+            "General and Coding should differ"
+        );
+        assert_ne!(
+            coding_score, embedding_score,
+            "Coding and Embedding should differ"
+        );
     }
 
     #[test]

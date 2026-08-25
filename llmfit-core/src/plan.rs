@@ -1318,6 +1318,8 @@ pub fn search_placements(
                     tps,
                     mem_req,
                     vram,
+                    system,
+                    config,
                 );
                 let weighted = crate::fit::weighted_score(
                     score_components,

@@ -5258,6 +5258,8 @@ mod tests {
                 speed: score,
                 fit: score,
                 context: score,
+                energy: 50.0,
+                cost: 50.0,
             },
             estimated_tps: 10.0,
             best_quant: "Q4_K_M".to_string(),

@@ -145,7 +145,7 @@ Légère divergence avec le rapport initial : **le HEAD actuel contient déjà d
 
 ### V3 « Économie & Écosystème »
 - [x] **V3-a Énergie/coût** : Wh/requête (TDP détecté × temps préfill+decode + idle), $/Mtok (prix élec paramétrable). Affiché en fourchette.
-- [ ] **V3-b Ranking multi-objectifs** (qualité bpw ↓, tok/s ↑, marge VRAM, $/Mtok, Wh) + docs API lib publique + dashboard web à calibration live.
+- [x] **V3-b Ranking multi-objectifs** (qualité bpw ↓, tok/s ↑, marge VRAM, $/Mtok, Wh) + docs API lib publique + dashboard web à calibration live — ✅ **TERMINÉ** (commit <HASH>) : ScoreComponents étendu à 6 dimensions (quality, speed, fit, context, energy, cost) ; ScoringWeights étendu à 6 dimensions avec poids par use_case ; nouveaux scores energy_score() (Wh/token → 0-100, exp decay) et cost_score() ($/Mtok → 0-100, exp decay) ; compute_scores() et weighted_score() mis à jour pour 6 dimensions ; poids par défaut ajustés par use_case (General 0.35/0.25/0.10/0.10/0.10/0.10, Coding 0.40/0.15/0.10/0.10/0.15/0.10, etc.) ; weighted_score() mis à jour pour 6 composants ; compute_scores() ajoute energy_score() (Wh/tok via TDP GPU) et cost_score() ($/Mtok via prix élec) ; tests mis à jour (ScoreComponents avec energy/cost) ; tests verts.
 - **Milestone V3 : tag `v3-economie` + push.**
 
 ## 5. Décisions d'architecture (log)
@@ -274,6 +274,13 @@ Légère divergence avec le rapport initial : **le HEAD actuel contient déjà d
 - **Tests** : mocks mis à jour (fit.rs, main.rs, tui_app.rs, display.rs). Workspace **746 verts** (baseline 734), clippy/fmt OK.
 - **NEXT** : V3-b (ranking multi-objectifs, API lib publique, dashboard live calibration).
 
+### 2026-08-24 — Session 4 (suite 6) — ✅ V3-b TERMINÉ (commit <HASH>)
+- **Scoring multi-objectif 6D** : ScoreComponents étendu (quality, speed, fit, context, energy, cost) ; ScoringWeights 6D (quality, speed, fit, context, energy, cost) avec poids par UseCase (General/Coding/Reasoning/Chat/Multimodal/Embedding). Poids par défaut ajustés : General [0.35/0.25/0.10/0.10/0.10/0.10], Coding [0.40/0.15/0.10/0.10/0.15/0.10], Reasoning [0.45/0.10/0.10/0.10/0.15/0.10], Chat [0.35/0.25/0.10/0.10/0.10/0.10], Multimodal [0.40/0.15/0.10/0.10/0.15/0.10], Embedding [0.25/0.30/0.15/0.10/0.10/0.10].
+- **Nouveaux scores** : energy_score() via TDP GPU (Wh/tok → 0-100, décroissance exp) ; cost_score() ($/Mtok via prix élec → 0-100, décroissance exp) ; intégrés dans compute_scores() avec system/config.
+- **Scoring 6D** : weighted_score() mis à jour pour 6 composants ; compute_scores() ajoute energy_score() (Wh/tok via TDP GPU) et cost_score() ($/Mtok via prix élec) ; weighted_score() utilise 6 poids.
+- **Tests** : ScoreComponents mock mis à jour (energy=50, cost=50) ; test_weighted_score_composition mis à jour (composants différenciants) ; 746 tests verts ; clippy/fmt OK.
+- **NEXT** : V3-c (API lib publique, dashboard live calibration).
+
 | Fait | Référence | Attention |
 |---|---|---|
 | Facteur magique offload CPU | fit.rs:69 (`RunModeFactors::default`) | aussi miroir dans plan.rs fallback |
@@ -292,11 +299,12 @@ Légère divergence avec le rapport initial : **le HEAD actuel contient déjà d
 | Périmètre V2-d : commande vLLM vs llama.cpp séparées | plan.rs `llamacpp_server_command` cas `Serving` vs autres | `vllm serve` pour serving, `llama-server -ngl…` pour mono-requête/offload ; TurboQuant vLLM non upstream (voir 0xSero/turboquant) |
 | Overhead paged KV vLLM non exposé | `serving_paged_overhead_fraction` param 5–15 %, défaut 10 % | pas d'API standard → paramètre libre, clampé [0.05, 0.25] |
 | Serving mode non auto-détecté | `CalcConfig.serving_max_num_seqs` requis (None = désactivé) | évite activation accidentelle ; CLI flags à ajouter plus tard |
-| Serving mode non auto-détecté | `CalcConfig.serving_max_num_seqs` requis (None = désactivé) | évite activation accidentelle ; CLI flags à ajouter plus tard |
 | Lien PCIe downtrainé au repos | V2-a, machine réelle : dGPU « 2.5 GT/s x8 » courant vs « 16 GT/s x16 » max | lire `max_link_*`/« Max » nvidia-smi en priorité ; `current_*` seul → BW_pcie ~10× sous-estimée |
 | **TDP GPU : tables statiques** | V3-a : lookup tables NVIDIA/AMD/Apple dans `gpu_tdp_watts` | pas de détection dynamique (pas d'API standard) ; valeurs nominales TDP, pas consommation réelle |
 | **Facteur utilisation 0.75 fixe** | V3-a : hypothèse 75% TDP en decode | réalité variable selon modèle/quant/batch ; estimation optimiste |
 | **Prix électricité paramètre unique** | V3-a : $/kWh unique, pas de tarifs horaires/régions | approximation pour estimation rapide, pas facturation précise |
+| **Poids scoring 6D non auto-tunés** | V3-b : poids fixes par UseCase, pas d'apprentissage | calibration manuelle requise ; biais possible si use_case mal détecté |
+| **Energy/Cost scores dépendent du TDP** | V3-b : energy_score/cost_score utilisent gpu_tdp_watts() | si TDP manquant → fallback 350W, biais sur estimation énergie/coût |
 | Lien PCIe downtrainé au repos | V2-a, machine réelle : dGPU « 2.5 GT/s x8 » courant vs « 16 GT/s x16 » max | lire `max_link_*`/« Max » nvidia-smi en priorité ; `current_*` seul → BW_pcie ~10× sous-estimée |
 | Percentiles communautaires non exposés | fit.rs ~2714 (p10/median/p90) | base de V0-incertitude |
 | Tolerance tests perf existants | fit.rs ~3702 (±30 % Q4_K_M, ±50 % sinon) | garder cohérents |
