@@ -43,6 +43,7 @@ jobs:
         run: cargo build --release --target ${{ matrix.target }}
       - name: Rename binary
         run: |
+          mkdir -p dist
           if [ "${{ runner.os }}" = "Windows" ]; then
             cp target/${{ matrix.target }}/release/llmfit.exe "dist/${{ matrix.artifact_name }}"
           else
