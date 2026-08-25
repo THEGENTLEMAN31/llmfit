@@ -65,7 +65,7 @@ impl Theme {
 
     /// Path to the config file: `<config_dir>/llmfit/theme`
     fn config_path() -> Option<PathBuf> {
-        Some(dirs::config_dir()?.join("llmfit").join("theme"))
+        Some(dirs::config_dir()?.join("llmfit-x").join("theme"))
     }
 
     /// Save the current theme to disk.

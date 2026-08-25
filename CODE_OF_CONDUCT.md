@@ -1,17 +1,29 @@
-# Code of Conduct
+# Contributor Covenant Code of Conduct
 
-This project adopts the **Contributor Covenant v2.1** as its code of conduct.
+## Our Pledge
 
-The full text is available at: https://www.contributor-covenant.org/version/2/1/code_of_conduct/
+We pledge to make participation in our community a harassment-free experience for everyone.
 
-## Summary
+## Our Standards
 
-We are committed to making participation in this project a welcoming experience for everyone regardless of background or identity. We expect all contributors to act professionally and respectfully.
+**Positive behavior:**
+- Empathy and kindness
+- Respect for differing opinions
+- Constructive feedback
+- Focus on what's best for the community
 
-## Reporting
-
-If you experience or witness behavior that violates this code of conduct, please report it by opening an issue or contacting the maintainers directly.
+**Unacceptable behavior:**
+- Harassment, discrimination, hate speech
+- Trolling, insults, personal attacks
+- Publishing private info without consent
+- Sexual content, unwanted advances
 
 ## Enforcement
 
-Project maintainers are responsible for clarifying standards of acceptable behavior and will take appropriate and fair corrective action in response to any behavior they deem inappropriate.
+Report violations to: conduct@llmfit.org (or GitHub DM maintainers)
+
+All complaints reviewed promptly and fairly.
+
+## Attribution
+
+Adapted from [Contributor Covenant v2.1](https://www.contributor-covenant.org/version/2/1/code_of_conduct.html).

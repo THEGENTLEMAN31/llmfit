@@ -1,5 +1,5 @@
-use llmfit_core::fit::{FitLevel, InferenceRuntime, ModelFit, RunMode};
-use llmfit_core::hardware::SystemSpecs;
+use llmfit_x_core::fit::{FitLevel, InferenceRuntime, ModelFit, RunMode};
+use llmfit_x_core::hardware::SystemSpecs;
 
 pub fn system_json(specs: &SystemSpecs) -> serde_json::Value {
     let gpus_json: Vec<serde_json::Value> = specs
@@ -12,7 +12,7 @@ pub fn system_json(specs: &SystemSpecs) -> serde_json::Value {
                 "backend": g.backend.label(),
                 "count": g.count,
                 "unified_memory": g.unified_memory,
-                "memory_bandwidth_gbps": llmfit_core::hardware::gpu_memory_bandwidth_gbps(&g.name),
+                "memory_bandwidth_gbps": llmfit_x_core::hardware::gpu_memory_bandwidth_gbps(&g.name),
             })
         })
         .collect();
@@ -74,15 +74,15 @@ pub fn fit_to_json(fit: &ModelFit) -> serde_json::Value {
         "supports_tp": fit.model.valid_tp_sizes(),
         "installed": fit.installed,
         "disk_size_gb": round2(fit.model.estimate_disk_gb(&fit.best_quant)),
-        "ollama_name": llmfit_core::providers::ollama_pull_tag(&fit.model.name),
+        "ollama_name": llmfit_x_core::providers::ollama_pull_tag(&fit.model.name),
         "estimate_basis": fit.estimate_basis,
         "verify_command": generate_llamabench_command(fit),
         "measured_tps": fit.measured_tps,
         // V0-incertitude: every throughput payload carries its interval.
         "tps_range": fit.tps_range.as_ref().map(|r| {
             let source = match r.source {
-                llmfit_core::fit::TpsRangeSource::CommunitySamples => "community_p10_p90",
-                llmfit_core::fit::TpsRangeSource::EmpiricalBand => "empirical_plus_minus_25pct",
+                llmfit_x_core::fit::TpsRangeSource::CommunitySamples => "community_p10_p90",
+                llmfit_x_core::fit::TpsRangeSource::EmpiricalBand => "empirical_plus_minus_25pct",
             };
             let mut obj = serde_json::Map::new();
             obj.insert("low".into(), serde_json::json!(round1(r.low)));
@@ -157,7 +157,7 @@ pub fn round2(v: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use llmfit_core::hardware::{GpuBackend, GpuInfo};
+    use llmfit_x_core::hardware::{GpuBackend, GpuInfo};
 
     fn specs_with_gpu(name: &str) -> SystemSpecs {
         SystemSpecs {
@@ -203,11 +203,11 @@ mod tests {
 
     #[test]
     fn fit_json_exposes_context_fields() {
-        let db = llmfit_core::models::ModelDatabase::new();
+        let db = llmfit_x_core::models::ModelDatabase::new();
         let model = db
             .get_all_models()
             .iter()
-            .find(|m| m.context_length > llmfit_core::fit::DEFAULT_ESTIMATION_CTX)
+            .find(|m| m.context_length > llmfit_x_core::fit::DEFAULT_ESTIMATION_CTX)
             .expect("catalog has a model with a large context window");
         let fit = ModelFit::analyze(model, &specs_with_gpu("Tesla T4"));
 
@@ -216,14 +216,14 @@ mod tests {
         assert_eq!(json["usable_context"], fit.usable_context);
         assert_eq!(
             json["effective_context_length"],
-            llmfit_core::fit::DEFAULT_ESTIMATION_CTX
+            llmfit_x_core::fit::DEFAULT_ESTIMATION_CTX
         );
         assert!(fit.usable_context <= model.context_length);
     }
 
     #[test]
     fn fit_json_carries_formerly_cli_only_fields() {
-        let db = llmfit_core::models::ModelDatabase::new();
+        let db = llmfit_x_core::models::ModelDatabase::new();
         let model = db
             .get_all_models()
             .iter()

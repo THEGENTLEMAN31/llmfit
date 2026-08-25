@@ -8,14 +8,14 @@ use axum::http::{HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use llmfit_core::fit::{
+use llmfit_x_core::fit::{
     FitLevel, InferenceRuntime, ModelFit, SortColumn, backend_compatible,
     rank_models_by_fit_opts_col,
 };
-use llmfit_core::hardware::{GpuBackend, SystemSpecs};
-use llmfit_core::models::{LlmModel, ModelDatabase, UseCase};
-use llmfit_core::plan::{PlanRequest, estimate_model_plan};
-use llmfit_core::providers::{
+use llmfit_x_core::hardware::{GpuBackend, SystemSpecs};
+use llmfit_x_core::models::{LlmModel, ModelDatabase, UseCase};
+use llmfit_x_core::plan::{PlanRequest, estimate_model_plan};
+use llmfit_x_core::providers::{
     DockerModelRunnerProvider, LlamaCppProvider, LmStudioProvider, MlxProvider, ModelProvider,
     OllamaProvider, PullEvent, VllmProvider,
 };
@@ -729,7 +729,7 @@ async fn plan_estimate(
         .ok_or_else(|| ApiError::bad_request(format!("model '{}' not found", body.model)))?;
 
     let kv_quant = match body.kv_quant.as_deref() {
-        Some(s) => Some(llmfit_core::models::KvQuant::parse(s).ok_or_else(|| {
+        Some(s) => Some(llmfit_x_core::models::KvQuant::parse(s).ok_or_else(|| {
             ApiError::bad_request(format!(
                 "Unsupported kv_quant '{}'. Valid: fp16, fp8, q8_0, q4_0, tq",
                 s
@@ -817,7 +817,7 @@ fn filtered_fits(
     }
 
     if let Some(ref lic_str) = query.license {
-        fits.retain(|f| llmfit_core::models::matches_license_filter(&f.model.license, lic_str));
+        fits.retain(|f| llmfit_x_core::models::matches_license_filter(&f.model.license, lic_str));
     }
 
     let include_too_tight = query.include_too_tight.unwrap_or(!top_only);
@@ -928,16 +928,16 @@ fn parse_runtime(raw: Option<&str>) -> Result<RuntimeFilter, ApiError> {
 
 fn parse_force_runtime(
     raw: Option<&str>,
-) -> Result<Option<llmfit_core::fit::InferenceRuntime>, ApiError> {
+) -> Result<Option<llmfit_x_core::fit::InferenceRuntime>, ApiError> {
     let Some(value) = raw else {
         return Ok(None);
     };
     match value.trim().to_lowercase().as_str() {
-        "mlx" => Ok(Some(llmfit_core::fit::InferenceRuntime::Mlx)),
+        "mlx" => Ok(Some(llmfit_x_core::fit::InferenceRuntime::Mlx)),
         "llamacpp" | "llama.cpp" | "llama_cpp" => {
-            Ok(Some(llmfit_core::fit::InferenceRuntime::LlamaCpp))
+            Ok(Some(llmfit_x_core::fit::InferenceRuntime::LlamaCpp))
         }
-        "vllm" => Ok(Some(llmfit_core::fit::InferenceRuntime::Vllm)),
+        "vllm" => Ok(Some(llmfit_x_core::fit::InferenceRuntime::Vllm)),
         _ => Err(ApiError::bad_request(
             "invalid force_runtime value: use mlx|llamacpp|vllm",
         )),

@@ -2,11 +2,11 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 
 use colored::*;
-use llmfit_core::fit::{FitLevel, ModelFit, RunMode, SortColumn};
-use llmfit_core::gguf::GgufModelSummary;
-use llmfit_core::hardware::SystemSpecs;
-use llmfit_core::models::LlmModel;
-use llmfit_core::plan::PlanEstimate;
+use llmfit_x_core::fit::{FitLevel, ModelFit, RunMode, SortColumn};
+use llmfit_x_core::gguf::GgufModelSummary;
+use llmfit_x_core::hardware::SystemSpecs;
+use llmfit_x_core::models::LlmModel;
+use llmfit_x_core::plan::PlanEstimate;
 use tabled::{Table, Tabled, settings::Style};
 
 #[derive(Tabled)]
@@ -211,10 +211,10 @@ pub fn display_model_detail(fit: &ModelFit) {
             "  Expected range: {} ({})",
             r,
             match r.source {
-                llmfit_core::fit::TpsRangeSource::CommunitySamples => {
+                llmfit_x_core::fit::TpsRangeSource::CommunitySamples => {
                     "community p10–p90"
                 }
-                llmfit_core::fit::TpsRangeSource::EmpiricalBand => "±25% empirical band",
+                llmfit_x_core::fit::TpsRangeSource::EmpiricalBand => "±25% empirical band",
             }
         ),
         None => println!("  Expected range: n/a"),
@@ -539,7 +539,7 @@ pub fn display_json_fits(specs: &SystemSpecs, fits: &[ModelFit]) {
 
 /// Serialize system specs + model fits to JSON with llama.cpp commands and print to stdout.
 pub fn display_json_fits_with_llamacpp(specs: &SystemSpecs, fits: &[ModelFit]) {
-    use llmfit_core::fit::InferenceRuntime;
+    use llmfit_x_core::fit::InferenceRuntime;
 
     let models: Vec<serde_json::Value> = fits
         .iter()
@@ -580,7 +580,7 @@ fn display_estimate_basis(fit: &ModelFit) {
 
     if let Some(m) = &fit.measured_tps {
         match m.source {
-            llmfit_core::benchmarks::MeasuredSource::LocalBench => {
+            llmfit_x_core::benchmarks::MeasuredSource::LocalBench => {
                 println!("{}", "Measured on This Machine:".bold().underline());
                 println!(
                     "  {:.1} tok/s from your own `llmfit bench` run(s) ({} stored)",
@@ -588,7 +588,7 @@ fn display_estimate_basis(fit: &ModelFit) {
                 );
                 println!("  Your measurement — trust this over the formula estimate below.");
             }
-            llmfit_core::benchmarks::MeasuredSource::CommunityLlmfit => {
+            llmfit_x_core::benchmarks::MeasuredSource::CommunityLlmfit => {
                 println!("{}", "Measured on Identical Hardware:".bold().underline());
                 println!(
                     "  {:.1} tok/s median across {} llmfit community submission(s) \
@@ -599,7 +599,7 @@ fn display_estimate_basis(fit: &ModelFit) {
                     "  Real runs on your exact hardware — trust this over the estimate below."
                 );
             }
-            llmfit_core::benchmarks::MeasuredSource::Community => {
+            llmfit_x_core::benchmarks::MeasuredSource::Community => {
                 println!("{}", "Measured on Matching Hardware:".bold().underline());
                 println!(
                     "  {:.1} tok/s median across {} community run(s) on {} (localmaxxing.com)",
@@ -770,7 +770,7 @@ fn llamacpp_binary_arg() -> PathBuf {
 /// a model is conversational. May misfire on edge cases (e.g. an embedding model
 /// named "multichat", or a general-purpose model named "functionary").
 fn should_use_llamacpp_conversation_mode(fit: &ModelFit) -> bool {
-    use llmfit_core::models::{Capability, UseCase};
+    use llmfit_x_core::models::{Capability, UseCase};
 
     let name = fit.model.name.to_lowercase();
     let use_case = fit.model.use_case.to_lowercase();
@@ -910,7 +910,7 @@ pub fn display_model_plan(plan: &PlanEstimate) {
         if let Some(tps) = path.estimated_tps {
             // V0-incertitude: plan paths render from RunPath, not ModelFit —
             // apply the same documented ±25% empirical band here.
-            let range = llmfit_core::fit::TpsRange::empirical(tps);
+            let range = llmfit_x_core::fit::TpsRange::empirical(tps);
             println!("    est speed: {:.1} tok/s ({})", tps, range.compact());
         }
     }
@@ -1370,8 +1370,8 @@ pub fn display_csv_fits(fits: &[ModelFit]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use llmfit_core::fit::{FitLevel, InferenceRuntime, ScoreComponents};
-    use llmfit_core::models::{Capability, GgufSource, ModelFormat, UseCase};
+    use llmfit_x_core::fit::{FitLevel, InferenceRuntime, ScoreComponents};
+    use llmfit_x_core::models::{Capability, GgufSource, ModelFormat, UseCase};
 
     fn mock_fit(run_mode: RunMode, use_case: UseCase, model_use_case: &str) -> ModelFit {
         ModelFit {

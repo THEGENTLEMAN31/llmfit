@@ -29,14 +29,14 @@ use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const UPSTREAM_OWNER: &str = "AlexsJones";
-const UPSTREAM_REPO: &str = "llmfit";
+const UPSTREAM_REPO: &str = "llmfit-x";
 const UPSTREAM_BRANCH: &str = "main";
 const SUBMISSION_DIR: &str = "llmfit-core/data/community";
 const SCHEMA_VERSION: u32 = 1;
 const USER_AGENT: &str = concat!("llmfit/", env!("CARGO_PKG_VERSION"));
 const API: &str = "https://api.github.com";
 
-/// Public OAuth App client id used for the device flow (the "llmfit" OAuth
+/// Public OAuth App client id used for the device flow (the "llmfit-x" OAuth
 /// App, device flow enabled). This is **not** a secret — the device flow
 /// requires no client secret, so shipping it in the binary is by design.
 /// Override with the `LLMFIT_GH_CLIENT_ID` environment variable (e.g. when
@@ -179,7 +179,7 @@ fn build_submission(results: &[BenchResult], specs: &SystemSpecs) -> Submission 
         schema_version: SCHEMA_VERSION,
         submitted_at_unix: now_unix(),
         tool: ToolInfo {
-            name: "llmfit",
+            name: "llmfit-x",
             version: env!("CARGO_PKG_VERSION"),
         },
         hardware: HwPayload {
@@ -320,7 +320,7 @@ fn store_root() -> Option<PathBuf> {
     {
         return Some(PathBuf::from(dir));
     }
-    Some(dirs::data_local_dir()?.join("llmfit").join("benchmarks"))
+    Some(dirs::data_local_dir()?.join("llmfit-x").join("benchmarks"))
 }
 
 /// llama-server reports the value of its `-m/--model` argument, usually an
@@ -832,7 +832,7 @@ pub fn cache_token(token: &str) -> Result<(), String> {
 }
 
 fn token_path() -> Option<std::path::PathBuf> {
-    Some(dirs::config_dir()?.join("llmfit").join("github_token"))
+    Some(dirs::config_dir()?.join("llmfit-x").join("github_token"))
 }
 
 fn read_cached_token() -> Option<String> {

@@ -788,7 +788,7 @@ fn handle_benchmarks_mode(app: &mut App, key: KeyEvent) {
 mod tests {
     use super::*;
     use crate::tui_app::PlanField;
-    use llmfit_core::hardware::{GpuBackend, SystemSpecs};
+    use llmfit_x_core::hardware::{GpuBackend, SystemSpecs};
 
     fn plan_mode_app() -> App {
         let mut app = App::with_specs_and_context(

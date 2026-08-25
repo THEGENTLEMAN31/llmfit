@@ -5,7 +5,7 @@ edition = "2024"
 authors = ["axjns"]
 description = "macOS desktop application for llmfit — visual LLM hardware fitting"
 license = "MIT"
-repository = "https://github.com/AlexsJones/llmfit"
+repository = "https://github.com/THEGENTLEMAN31/llmfit-x"
 default-run = "llmfit-desktop"
 
 [[bin]]
@@ -13,7 +13,7 @@ name = "llmfit-desktop"
 path = "src/main.rs"
 
 [dependencies]
-llmfit-core = { path = "../llmfit-core" }
+llmfit-x-core = { path = "../llmfit-core" }
 tauri = { version = "2", features = [] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

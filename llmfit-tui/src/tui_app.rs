@@ -1,13 +1,15 @@
-use llmfit_core::fit::{CalcConfig, FitLevel, ModelFit, SortColumn, backend_compatible};
-use llmfit_core::hardware::SystemSpecs;
-use llmfit_core::models::{Capability, LlmModel, ModelDatabase, UseCase, matches_provider_filter};
-use llmfit_core::plan::{PlanEstimate, PlanRequest, estimate_model_plan_with_config};
-use llmfit_core::providers::{
+use llmfit_x_core::fit::{CalcConfig, FitLevel, ModelFit, SortColumn, backend_compatible};
+use llmfit_x_core::hardware::SystemSpecs;
+use llmfit_x_core::models::{
+    Capability, LlmModel, ModelDatabase, UseCase, matches_provider_filter,
+};
+use llmfit_x_core::plan::{PlanEstimate, PlanRequest, estimate_model_plan_with_config};
+use llmfit_x_core::providers::{
     self, DockerModelRunnerProvider, LlamaCppProvider, LmStudioProvider, MlxProvider,
     ModelProvider, OllamaProvider, PullEvent, PullHandle, RamaLamaProvider, VllmProvider,
     command_exists,
 };
-use llmfit_core::quality;
+use llmfit_x_core::quality;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::mpsc;
@@ -370,7 +372,7 @@ pub enum BenchOfferState {
 /// (".../gemma-3.Q8_0.gguf") get exact stem matching only — feeding a bare
 /// stem into the Ollama candidate heuristics would match whole families.
 fn bench_target_matches(target_model: &str, hf_name: &str) -> bool {
-    llmfit_core::providers::tag_matches_model(target_model, hf_name)
+    llmfit_x_core::providers::tag_matches_model(target_model, hf_name)
 }
 
 /// Body of the bench-offer worker thread: find the selected model on a running
@@ -383,8 +385,8 @@ fn bench_offer_worker(
     share: bool,
     specs: &SystemSpecs,
 ) {
-    use llmfit_core::bench::{self, BenchTarget};
-    use llmfit_core::share;
+    use llmfit_x_core::bench::{self, BenchTarget};
+    use llmfit_x_core::share;
 
     let targets = bench::discover_all_targets();
     let target = targets.into_iter().find(|t| {
@@ -567,7 +569,7 @@ fn bench_offer_worker(
 /// code rendered inside the modal. Runs before the benchmark so credential
 /// problems surface immediately.
 fn tui_share_auth(tx: &mpsc::Sender<BenchOfferMsg>) -> Result<String, String> {
-    use llmfit_core::share;
+    use llmfit_x_core::share;
 
     if let Some((token, source)) = share::resolve_token_noninteractive_with_source() {
         match share::validate_token(&token) {
@@ -750,7 +752,7 @@ impl TpFilter {
         }
     }
 
-    pub fn matches(&self, model: &llmfit_core::models::LlmModel) -> bool {
+    pub fn matches(&self, model: &llmfit_x_core::models::LlmModel) -> bool {
         match self {
             TpFilter::All => true,
             TpFilter::Tp2 => model.supports_tp(2),
@@ -931,7 +933,7 @@ pub struct App {
     // Provider state
     pub ollama_available: bool,
     pub ollama_binary_available: bool,
-    pub installed: llmfit_core::analysis::InstalledIndex,
+    pub installed: llmfit_x_core::analysis::InstalledIndex,
     ollama: OllamaProvider,
     pub mlx_available: bool,
     mlx: MlxProvider,
@@ -1055,7 +1057,7 @@ pub struct App {
 
     // Benchmarks view (localmaxxing.com)
     pub show_benchmarks: bool,
-    pub bench_entries: Vec<llmfit_core::benchmarks::LeaderboardEntry>,
+    pub bench_entries: Vec<llmfit_x_core::benchmarks::LeaderboardEntry>,
     pub bench_cursor: usize,
     pub bench_scroll: usize,
     pub bench_loading: bool,
@@ -1091,7 +1093,7 @@ pub struct App {
     /// In-flight leaderboard fetch; the HTTP call runs on a worker thread so
     /// a slow or unreachable API can't freeze the UI.
     bench_fetch_rx:
-        Option<mpsc::Receiver<Result<llmfit_core::benchmarks::LeaderboardResponse, String>>>,
+        Option<mpsc::Receiver<Result<llmfit_x_core::benchmarks::LeaderboardResponse, String>>>,
 
     // Bench-offer modal (benchmark the selected model, optionally share as PR)
     pub bench_offer_state: BenchOfferState,
@@ -1154,7 +1156,7 @@ impl App {
         let vllm_available = false;
         let ramalama = RamaLamaProvider::new();
         let ramalama_available = false;
-        let mut installed = llmfit_core::analysis::InstalledIndex::empty();
+        let mut installed = llmfit_x_core::analysis::InstalledIndex::empty();
         installed.llamacpp = llamacpp_installed;
         installed.llamacpp_count = llamacpp_installed_count;
 
@@ -1193,7 +1195,8 @@ impl App {
                 let (available, installed, installed_count) = docker_mr.detect_with_installed();
                 // Distinguish "not installed" from "installed but Docker
                 // Desktop isn't running" (#731).
-                let app_installed = available || llmfit_core::providers::docker_desktop_installed();
+                let app_installed =
+                    available || llmfit_x_core::providers::docker_desktop_installed();
                 let _ = tx.send(ProviderDetectionMsg::DockerMr {
                     available,
                     app_installed,
@@ -1209,7 +1212,7 @@ impl App {
                 let (available, installed, installed_count) = lmstudio.detect_with_installed();
                 // Distinguish "not installed" from "installed but the local
                 // server isn't running" (#731).
-                let app_installed = available || llmfit_core::providers::lmstudio_app_installed();
+                let app_installed = available || llmfit_x_core::providers::lmstudio_app_installed();
                 let _ = tx.send(ProviderDetectionMsg::LmStudio {
                     available,
                     app_installed,
@@ -1253,9 +1256,9 @@ impl App {
         // Only analyze models that can actually run on this hardware.
         // Measured sources, most trustworthy first: your own runs, llmfit
         // community submissions on identical hardware, localmaxxing presets.
-        let local_index = llmfit_core::share::LocalBenchIndex::load(&specs);
-        let community_index = llmfit_core::benchmarks::CommunityBenchIndex::for_specs(&specs);
-        let measured_index = llmfit_core::benchmarks::MeasuredTpsIndex::for_specs(&specs);
+        let local_index = llmfit_x_core::share::LocalBenchIndex::load(&specs);
+        let community_index = llmfit_x_core::benchmarks::CommunityBenchIndex::for_specs(&specs);
+        let measured_index = llmfit_x_core::benchmarks::MeasuredTpsIndex::for_specs(&specs);
         let mut all_fits: Vec<ModelFit> = db
             .get_all_models()
             .iter()
@@ -1278,10 +1281,10 @@ impl App {
             .collect();
 
         // Calibrate formula estimates from the user's own benchmark runs.
-        llmfit_core::analysis::apply_local_calibration(&mut all_fits);
+        llmfit_x_core::analysis::apply_local_calibration(&mut all_fits);
 
         // Sort by fit level then RAM usage
-        all_fits = llmfit_core::fit::rank_models_by_fit(all_fits);
+        all_fits = llmfit_x_core::fit::rank_models_by_fit(all_fits);
 
         // Extract unique providers (including GGUF source providers)
         let mut model_providers: Vec<String> = all_fits
@@ -1808,7 +1811,7 @@ impl App {
 
                 // Hide MLX-only models on non-Apple Silicon systems
                 let is_apple_silicon = self.specs.backend
-                    == llmfit_core::hardware::GpuBackend::Metal
+                    == llmfit_x_core::hardware::GpuBackend::Metal
                     && self.specs.unified_memory;
                 if fit.model.is_mlx_only() && !is_apple_silicon {
                     return false;
@@ -1923,7 +1926,7 @@ impl App {
                         true
                     } else {
                         let is_apple_silicon = self.specs.backend
-                            == llmfit_core::hardware::GpuBackend::Metal
+                            == llmfit_x_core::hardware::GpuBackend::Metal
                             && self.specs.unified_memory;
                         // Determine which runtimes this model is compatible with
                         let compat_llamacpp =
@@ -2481,12 +2484,12 @@ impl App {
                 self.bench_offer_state = BenchOfferState::Offer;
                 self.bench_offer_model = name;
                 self.bench_offer_providers = providers;
-                self.bench_offer_pending = llmfit_core::share::pending_benchmarks().len();
+                self.bench_offer_pending = llmfit_x_core::share::pending_benchmarks().len();
                 // Cheap offline check (env var + cached-token file) so the
                 // modal can flag missing credentials before a bench starts.
                 self.bench_offer_share_unavailable =
-                    if llmfit_core::share::resolve_token_noninteractive().is_some()
-                        || llmfit_core::share::oauth_client_id().is_some()
+                    if llmfit_x_core::share::resolve_token_noninteractive().is_some()
+                        || llmfit_x_core::share::oauth_client_id().is_some()
                     {
                         None
                     } else {
@@ -2630,7 +2633,7 @@ impl App {
     pub fn refresh_local_measured_tps(&mut self) {
         // Same specs the fits were built with: under simulated hardware the
         // stored runs won't match, so simulated estimates stay untouched.
-        if let Some(idx) = llmfit_core::share::LocalBenchIndex::load(&self.specs) {
+        if let Some(idx) = llmfit_x_core::share::LocalBenchIndex::load(&self.specs) {
             for fit in &mut self.all_fits {
                 if let Some(m) = idx.lookup(&fit.model.name) {
                     fit.measured_tps = Some(m);
@@ -2638,7 +2641,7 @@ impl App {
                 }
             }
         }
-        llmfit_core::analysis::apply_local_calibration(&mut self.all_fits);
+        llmfit_x_core::analysis::apply_local_calibration(&mut self.all_fits);
     }
 
     /// Rebuild the rows pinned at the top of the leaderboard: your stored
@@ -2647,7 +2650,7 @@ impl App {
     /// "llmfit community"). Skipped while browsing a hardware preset other
     /// than this machine.
     pub fn merge_local_bench_rows(&mut self) {
-        use llmfit_core::benchmarks::{
+        use llmfit_x_core::benchmarks::{
             LeaderboardEngine, LeaderboardEntry, LeaderboardModel, LeaderboardUser,
         };
 
@@ -2698,8 +2701,8 @@ impl App {
 
         let mut local: Vec<LeaderboardEntry> = Vec::new();
         let stores = [
-            ("you (local)", llmfit_core::share::pending_benchmarks()),
-            ("you (shared)", llmfit_core::share::shared_benchmarks()),
+            ("you (local)", llmfit_x_core::share::pending_benchmarks()),
+            ("you (shared)", llmfit_x_core::share::shared_benchmarks()),
         ];
         for (who, stored) in &stores {
             for s in stored {
@@ -2728,7 +2731,7 @@ impl App {
             rows.iter()
                 .any(|e| e.hf_id() == model && e.tok_s_out.is_some_and(|t| (t - tps).abs() < 0.005))
         };
-        let community = llmfit_core::benchmarks::community_results_for_specs(&self.specs);
+        let community = llmfit_x_core::benchmarks::community_results_for_specs(&self.specs);
         for (i, r) in community.iter().enumerate() {
             if is_dup(&r.model, r.avg_tps, &local) {
                 continue;
@@ -2763,7 +2766,7 @@ impl App {
         let (tx, rx) = mpsc::channel();
         self.bench_fetch_rx = Some(rx);
         std::thread::spawn(move || {
-            let _ = tx.send(llmfit_core::benchmarks::fetch_leaderboard(
+            let _ = tx.send(llmfit_x_core::benchmarks::fetch_leaderboard(
                 &specs,
                 key.as_deref(),
                 100,
@@ -2797,7 +2800,7 @@ impl App {
                 // API failed — try embedded cache fallback for whichever view
                 // is current (simulated preset or detected hardware).
                 let cached = match &self.bench_hw_label {
-                    Some(label) => llmfit_core::benchmarks::cached_leaderboard_for_preset(label),
+                    Some(label) => llmfit_x_core::benchmarks::cached_leaderboard_for_preset(label),
                     None => self.find_cached_for_specs(),
                 };
                 if let Some(cached) = cached {
@@ -2891,16 +2894,16 @@ impl App {
     }
 
     /// Try to find cached benchmark data matching the user's detected hardware.
-    fn find_cached_for_specs(&self) -> Option<llmfit_core::benchmarks::LeaderboardResponse> {
+    fn find_cached_for_specs(&self) -> Option<llmfit_x_core::benchmarks::LeaderboardResponse> {
         let gpu_name = self.specs.gpu_name.as_deref().unwrap_or("");
         let lower = gpu_name.to_lowercase();
 
         // Try each preset and see if the GPU name matches
-        for preset in llmfit_core::benchmarks::HardwarePreset::all() {
+        for preset in llmfit_x_core::benchmarks::HardwarePreset::all() {
             if let Some(hw_name) = preset.hardware_name
                 && lower.contains(&hw_name.to_lowercase())
                 && let Some(cached) =
-                    llmfit_core::benchmarks::cached_leaderboard_for_preset(preset.label)
+                    llmfit_x_core::benchmarks::cached_leaderboard_for_preset(preset.label)
                 && !cached.rows.is_empty()
             {
                 return Some(cached);
@@ -2925,7 +2928,7 @@ impl App {
     }
 
     pub fn bench_hw_picker_down(&mut self) {
-        let presets = llmfit_core::benchmarks::HardwarePreset::all();
+        let presets = llmfit_x_core::benchmarks::HardwarePreset::all();
         // +1 for the "My Hardware (auto)" entry at position 0
         let max = presets.len(); // last valid index = presets.len() (0..=presets.len())
         if self.bench_hw_picker_cursor < max {
@@ -2934,7 +2937,7 @@ impl App {
     }
 
     pub fn bench_hw_picker_select(&mut self) {
-        let presets = llmfit_core::benchmarks::HardwarePreset::all();
+        let presets = llmfit_x_core::benchmarks::HardwarePreset::all();
         self.bench_hw_picker_open = false;
 
         if self.bench_hw_picker_cursor == 0 {
@@ -2953,7 +2956,7 @@ impl App {
             let (tx, rx) = mpsc::channel();
             self.bench_fetch_rx = Some(rx);
             std::thread::spawn(move || {
-                let _ = tx.send(llmfit_core::benchmarks::fetch_leaderboard_for_preset(
+                let _ = tx.send(llmfit_x_core::benchmarks::fetch_leaderboard_for_preset(
                     preset,
                     key.as_deref(),
                     100,
@@ -3095,7 +3098,7 @@ impl App {
         let kv_quant = if self.plan_kv_quant_input.trim().is_empty() {
             None
         } else {
-            match llmfit_core::models::KvQuant::parse(self.plan_kv_quant_input.trim()) {
+            match llmfit_x_core::models::KvQuant::parse(self.plan_kv_quant_input.trim()) {
                 Some(k) => Some(k),
                 None => {
                     self.plan_estimate = None;
@@ -3708,7 +3711,7 @@ impl App {
             .filter(|m| !backend_compatible(m, &self.specs))
             .count();
 
-        let measured_index = llmfit_core::benchmarks::MeasuredTpsIndex::for_specs(&self.specs);
+        let measured_index = llmfit_x_core::benchmarks::MeasuredTpsIndex::for_specs(&self.specs);
         self.all_fits = db
             .get_all_models()
             .iter()
@@ -3725,7 +3728,7 @@ impl App {
             })
             .collect();
 
-        self.all_fits = llmfit_core::fit::rank_models_by_fit(std::mem::take(&mut self.all_fits));
+        self.all_fits = llmfit_x_core::fit::rank_models_by_fit(std::mem::take(&mut self.all_fits));
         self.selected_row = 0;
         self.compare_models.clear();
         self.compare_mark_model = None;
@@ -4132,7 +4135,7 @@ impl App {
         // Update the config
         self.calc_config = CalcConfig {
             efficiency,
-            run_mode_factors: llmfit_core::fit::RunModeFactors {
+            run_mode_factors: llmfit_x_core::fit::RunModeFactors {
                 gpu,
                 cpu_offload,
                 moe_offload: moe,
@@ -4159,7 +4162,7 @@ impl App {
             .filter(|m| !backend_compatible(m, &self.specs))
             .count();
 
-        let measured_index = llmfit_core::benchmarks::MeasuredTpsIndex::for_specs(&self.specs);
+        let measured_index = llmfit_x_core::benchmarks::MeasuredTpsIndex::for_specs(&self.specs);
         self.all_fits = db
             .get_all_models()
             .iter()
@@ -4176,7 +4179,7 @@ impl App {
             })
             .collect();
 
-        self.all_fits = llmfit_core::fit::rank_models_by_fit(std::mem::take(&mut self.all_fits));
+        self.all_fits = llmfit_x_core::fit::rank_models_by_fit(std::mem::take(&mut self.all_fits));
         self.selected_row = 0;
         self.compare_models.clear();
         self.compare_mark_model = None;
@@ -4191,7 +4194,7 @@ impl App {
     /// Re-sort all_fits using current sort column and installed_first preference, then refilter.
     fn re_sort(&mut self) {
         let fits = std::mem::take(&mut self.all_fits);
-        let mut sorted = llmfit_core::fit::rank_models_by_fit_opts_col(
+        let mut sorted = llmfit_x_core::fit::rank_models_by_fit_opts_col(
             fits,
             self.installed_first,
             self.sort_column,
@@ -4261,10 +4264,10 @@ impl App {
     /// Build a user-friendly message explaining why no download is available,
     /// based on the model's weight format.
     fn format_no_download_message(
-        format: llmfit_core::models::ModelFormat,
+        format: llmfit_x_core::models::ModelFormat,
         is_mlx_model: bool,
     ) -> String {
-        use llmfit_core::models::ModelFormat;
+        use llmfit_x_core::models::ModelFormat;
         if is_mlx_model {
             "MLX model — requires Apple Silicon with MLX installed".to_string()
         } else {
@@ -4503,7 +4506,7 @@ impl App {
     fn available_download_providers(
         &self,
         model_name: &str,
-        model_format: llmfit_core::models::ModelFormat,
+        model_format: llmfit_x_core::models::ModelFormat,
         is_mlx_model: bool,
         has_catalog_gguf: bool,
     ) -> Vec<DownloadProvider> {
@@ -4600,7 +4603,7 @@ impl App {
         let (lmstudio, lmstudio_count) = self.lmstudio.installed_models_counted();
         let (vllm, vllm_count) = self.vllm.installed_models_counted();
         let (ramalama, ramalama_count) = self.ramalama.installed_models_counted();
-        self.installed = llmfit_core::analysis::InstalledIndex {
+        self.installed = llmfit_x_core::analysis::InstalledIndex {
             ollama,
             ollama_count,
             mlx,
@@ -4834,7 +4837,7 @@ impl App {
     }
 
     fn bench_cache_path() -> Option<std::path::PathBuf> {
-        dirs::home_dir().map(|h| h.join(".config").join("llmfit").join("bench-cache.json"))
+        dirs::home_dir().map(|h| h.join(".config").join("llmfit-x").join("bench-cache.json"))
     }
 
     fn save_bench_cache(&self) {
@@ -5173,9 +5176,9 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use llmfit_core::fit::{InferenceRuntime, RunMode, ScoreComponents};
-    use llmfit_core::hardware::GpuBackend;
-    use llmfit_core::models::{GgufSource, LlmModel, ModelFormat, UseCase};
+    use llmfit_x_core::fit::{InferenceRuntime, RunMode, ScoreComponents};
+    use llmfit_x_core::hardware::GpuBackend;
+    use llmfit_x_core::models::{GgufSource, LlmModel, ModelFormat, UseCase};
 
     fn test_app() -> App {
         App::with_specs_and_context(
@@ -5680,7 +5683,7 @@ mod tests {
         app.tick_bench_fetch();
         assert!(app.bench_loading);
 
-        tx.send(Ok(llmfit_core::benchmarks::LeaderboardResponse {
+        tx.send(Ok(llmfit_x_core::benchmarks::LeaderboardResponse {
             rows: Vec::new(),
             total: 42,
             limit: 100,
@@ -5787,8 +5790,8 @@ mod tests {
         model: &str,
         engine: &str,
         user: &str,
-    ) -> llmfit_core::benchmarks::LeaderboardEntry {
-        use llmfit_core::benchmarks::{
+    ) -> llmfit_x_core::benchmarks::LeaderboardEntry {
+        use llmfit_x_core::benchmarks::{
             LeaderboardEngine, LeaderboardEntry, LeaderboardModel, LeaderboardUser,
         };
         LeaderboardEntry {

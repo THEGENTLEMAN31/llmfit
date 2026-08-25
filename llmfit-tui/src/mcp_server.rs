@@ -1,11 +1,11 @@
-use llmfit_core::fit::{
+use llmfit_x_core::fit::{
     FitLevel, InferenceRuntime, ModelFit, SortColumn, backend_compatible,
     rank_models_by_fit_opts_col,
 };
-use llmfit_core::hardware::{GpuBackend, SystemSpecs};
-use llmfit_core::models::{LlmModel, ModelDatabase, UseCase};
-use llmfit_core::plan::{PlanRequest, estimate_model_plan};
-use llmfit_core::providers::{
+use llmfit_x_core::hardware::{GpuBackend, SystemSpecs};
+use llmfit_x_core::models::{LlmModel, ModelDatabase, UseCase};
+use llmfit_x_core::plan::{PlanRequest, estimate_model_plan};
+use llmfit_x_core::providers::{
     DockerModelRunnerProvider, LlamaCppProvider, LmStudioProvider, MlxProvider, ModelProvider,
     OllamaProvider, RamaLamaProvider, VllmProvider,
 };
@@ -142,7 +142,7 @@ impl LlmfitMcpServer {
         }
 
         if let Some(ref lic) = params.license {
-            fits.retain(|f| llmfit_core::models::matches_license_filter(&f.model.license, lic));
+            fits.retain(|f| llmfit_x_core::models::matches_license_filter(&f.model.license, lic));
         }
 
         let total = fits.len();

@@ -17,13 +17,13 @@ use std::process::Stdio;
 use std::thread;
 use std::time::Duration;
 
-use llmfit_core::bench;
-use llmfit_core::fit::{ModelFit, SortColumn, backend_compatible};
-use llmfit_core::hardware::SystemSpecs;
-use llmfit_core::models::{ModelDatabase, matches_provider_filter};
-use llmfit_core::plan::{PlanRequest, resolve_model_selector};
-use llmfit_core::quality;
-use llmfit_core::share;
+use llmfit_x_core::bench;
+use llmfit_x_core::fit::{ModelFit, SortColumn, backend_compatible};
+use llmfit_x_core::hardware::SystemSpecs;
+use llmfit_x_core::models::{ModelDatabase, matches_provider_filter};
+use llmfit_x_core::plan::{PlanRequest, resolve_model_selector};
+use llmfit_x_core::quality;
+use llmfit_x_core::share;
 
 fn parse_positive_usize(value: &str) -> Result<usize, String> {
     let parsed = value
@@ -90,7 +90,7 @@ enum FitArg {
 }
 
 #[derive(Parser)]
-#[command(name = "llmfit")]
+#[command(name = "llmfit-x")]
 #[command(about = "Right-size LLM models to your system's hardware")]
 #[command(long_about = "\
 Right-size LLM models to your system's hardware.
@@ -911,7 +911,7 @@ pub(crate) fn detect_specs(overrides: &HardwareOverrides) -> SystemSpecs {
     let mut specs = SystemSpecs::detect();
 
     if let Some(ram_str) = &overrides.ram {
-        match llmfit_core::hardware::parse_memory_size(ram_str) {
+        match llmfit_x_core::hardware::parse_memory_size(ram_str) {
             Some(gb) => specs = specs.with_ram_override(gb),
             None => {
                 eprintln!(
@@ -923,7 +923,7 @@ pub(crate) fn detect_specs(overrides: &HardwareOverrides) -> SystemSpecs {
     }
 
     if let Some(mem_str) = &overrides.memory {
-        match llmfit_core::hardware::parse_memory_size(mem_str) {
+        match llmfit_x_core::hardware::parse_memory_size(mem_str) {
             Some(gb) => specs = specs.with_gpu_memory_override(gb),
             None => {
                 eprintln!(
@@ -962,7 +962,7 @@ fn resolve_context_limit(max_context: Option<u32>) -> Option<u32> {
 }
 
 fn dashboard_pid_path() -> Option<std::path::PathBuf> {
-    llmfit_core::update::cache_dir().map(|d| d.join("dashboard.pid"))
+    llmfit_x_core::update::cache_dir().map(|d| d.join("dashboard.pid"))
 }
 
 fn write_dashboard_pid(pid: u32) {
@@ -1139,7 +1139,7 @@ fn run_fit(
         specs.display();
     }
 
-    let installed = llmfit_core::analysis::InstalledIndex::detect_all();
+    let installed = llmfit_x_core::analysis::InstalledIndex::detect_all();
 
     let hidden: usize = db
         .get_all_models()
@@ -1148,17 +1148,17 @@ fn run_fit(
         .count();
 
     let mut fits =
-        llmfit_core::analysis::build_model_fits(&db, &specs, &installed, context_limit, None);
+        llmfit_x_core::analysis::build_model_fits(&db, &specs, &installed, context_limit, None);
 
     if perfect {
-        fits.retain(|f| f.fit_level == llmfit_core::fit::FitLevel::Perfect);
+        fits.retain(|f| f.fit_level == llmfit_x_core::fit::FitLevel::Perfect);
     }
 
     if tool_use {
         fits.retain(|f| {
             f.model
                 .capabilities
-                .contains(&llmfit_core::models::Capability::ToolUse)
+                .contains(&llmfit_x_core::models::Capability::ToolUse)
         });
     }
 
@@ -1172,7 +1172,7 @@ fn run_fit(
         });
     }
 
-    fits = llmfit_core::fit::rank_models_by_fit_opts_col(fits, false, sort);
+    fits = llmfit_x_core::fit::rank_models_by_fit_opts_col(fits, false, sort);
 
     if let Some(n) = limit {
         fits.truncate(n);
@@ -1197,11 +1197,11 @@ fn run_fit(
 fn fit_matches_filter(fit: &ModelFit, filter: FitArg) -> bool {
     match filter {
         FitArg::All => true,
-        FitArg::Perfect => fit.fit_level == llmfit_core::fit::FitLevel::Perfect,
-        FitArg::Good => fit.fit_level == llmfit_core::fit::FitLevel::Good,
-        FitArg::Marginal => fit.fit_level == llmfit_core::fit::FitLevel::Marginal,
-        FitArg::Tight => fit.fit_level == llmfit_core::fit::FitLevel::TooTight,
-        FitArg::Runnable => fit.fit_level != llmfit_core::fit::FitLevel::TooTight,
+        FitArg::Perfect => fit.fit_level == llmfit_x_core::fit::FitLevel::Perfect,
+        FitArg::Good => fit.fit_level == llmfit_x_core::fit::FitLevel::Good,
+        FitArg::Marginal => fit.fit_level == llmfit_x_core::fit::FitLevel::Marginal,
+        FitArg::Tight => fit.fit_level == llmfit_x_core::fit::FitLevel::TooTight,
+        FitArg::Runnable => fit.fit_level != llmfit_x_core::fit::FitLevel::TooTight,
     }
 }
 
@@ -1289,7 +1289,7 @@ fn run_diff(
         .collect();
 
     fits.retain(|f| fit_matches_filter(f, fit_filter));
-    fits = llmfit_core::fit::rank_models_by_fit_opts_col(fits, false, sort);
+    fits = llmfit_x_core::fit::rank_models_by_fit_opts_col(fits, false, sort);
 
     let selected: Vec<ModelFit> =
         if let (Some(a), Some(b)) = (model_a.as_deref(), model_b.as_deref()) {
@@ -1465,9 +1465,11 @@ fn run_recommend(
     let forced_rt = force_runtime
         .as_deref()
         .map(|rt| match rt.to_lowercase().as_str() {
-            "mlx" => llmfit_core::fit::InferenceRuntime::Mlx,
-            "llamacpp" | "llama.cpp" | "llama_cpp" => llmfit_core::fit::InferenceRuntime::LlamaCpp,
-            "vllm" => llmfit_core::fit::InferenceRuntime::Vllm,
+            "mlx" => llmfit_x_core::fit::InferenceRuntime::Mlx,
+            "llamacpp" | "llama.cpp" | "llama_cpp" => {
+                llmfit_x_core::fit::InferenceRuntime::LlamaCpp
+            }
+            "vllm" => llmfit_x_core::fit::InferenceRuntime::Vllm,
             other => {
                 eprintln!(
                     "Unknown runtime '{}'. Valid options: mlx, llamacpp, vllm",
@@ -1477,55 +1479,60 @@ fn run_recommend(
             }
         });
 
-    let installed = llmfit_core::analysis::InstalledIndex::detect_all();
+    let installed = llmfit_x_core::analysis::InstalledIndex::detect_all();
 
-    let mut fits =
-        llmfit_core::analysis::build_model_fits(&db, &specs, &installed, context_limit, forced_rt);
+    let mut fits = llmfit_x_core::analysis::build_model_fits(
+        &db,
+        &specs,
+        &installed,
+        context_limit,
+        forced_rt,
+    );
 
     // Filter by minimum fit level
     let min_level = match min_fit.to_lowercase().as_str() {
-        "perfect" => llmfit_core::fit::FitLevel::Perfect,
-        "good" => llmfit_core::fit::FitLevel::Good,
-        "marginal" => llmfit_core::fit::FitLevel::Marginal,
-        _ => llmfit_core::fit::FitLevel::Marginal,
+        "perfect" => llmfit_x_core::fit::FitLevel::Perfect,
+        "good" => llmfit_x_core::fit::FitLevel::Good,
+        "marginal" => llmfit_x_core::fit::FitLevel::Marginal,
+        _ => llmfit_x_core::fit::FitLevel::Marginal,
     };
     fits.retain(|f| match (min_level, f.fit_level) {
-        (llmfit_core::fit::FitLevel::Marginal, llmfit_core::fit::FitLevel::TooTight) => false,
+        (llmfit_x_core::fit::FitLevel::Marginal, llmfit_x_core::fit::FitLevel::TooTight) => false,
         (
-            llmfit_core::fit::FitLevel::Good,
-            llmfit_core::fit::FitLevel::TooTight | llmfit_core::fit::FitLevel::Marginal,
+            llmfit_x_core::fit::FitLevel::Good,
+            llmfit_x_core::fit::FitLevel::TooTight | llmfit_x_core::fit::FitLevel::Marginal,
         ) => false,
-        (llmfit_core::fit::FitLevel::Perfect, llmfit_core::fit::FitLevel::Perfect) => true,
-        (llmfit_core::fit::FitLevel::Perfect, _) => false,
+        (llmfit_x_core::fit::FitLevel::Perfect, llmfit_x_core::fit::FitLevel::Perfect) => true,
+        (llmfit_x_core::fit::FitLevel::Perfect, _) => false,
         _ => true,
     });
 
     // Hide MLX-only models on non-Apple Silicon systems
     let is_apple_silicon =
-        specs.backend == llmfit_core::hardware::GpuBackend::Metal && specs.unified_memory;
+        specs.backend == llmfit_x_core::hardware::GpuBackend::Metal && specs.unified_memory;
     if !is_apple_silicon {
         fits.retain(|f| !f.model.is_mlx_only());
     }
 
     // Filter by runtime
     match runtime_filter.to_lowercase().as_str() {
-        "mlx" => fits.retain(|f| f.runtime == llmfit_core::fit::InferenceRuntime::Mlx),
+        "mlx" => fits.retain(|f| f.runtime == llmfit_x_core::fit::InferenceRuntime::Mlx),
         "llamacpp" | "llama.cpp" | "llama_cpp" => {
-            fits.retain(|f| f.runtime == llmfit_core::fit::InferenceRuntime::LlamaCpp)
+            fits.retain(|f| f.runtime == llmfit_x_core::fit::InferenceRuntime::LlamaCpp)
         }
-        "vllm" => fits.retain(|f| f.runtime == llmfit_core::fit::InferenceRuntime::Vllm),
+        "vllm" => fits.retain(|f| f.runtime == llmfit_x_core::fit::InferenceRuntime::Vllm),
         _ => {} // "any" or unrecognized — keep all
     }
 
     // Filter by use case if specified
     if let Some(ref uc) = use_case {
         let target = match uc.to_lowercase().as_str() {
-            "coding" | "code" => Some(llmfit_core::models::UseCase::Coding),
-            "reasoning" | "reason" => Some(llmfit_core::models::UseCase::Reasoning),
-            "chat" => Some(llmfit_core::models::UseCase::Chat),
-            "multimodal" | "vision" => Some(llmfit_core::models::UseCase::Multimodal),
-            "embedding" | "embed" => Some(llmfit_core::models::UseCase::Embedding),
-            "general" => Some(llmfit_core::models::UseCase::General),
+            "coding" | "code" => Some(llmfit_x_core::models::UseCase::Coding),
+            "reasoning" | "reason" => Some(llmfit_x_core::models::UseCase::Reasoning),
+            "chat" => Some(llmfit_x_core::models::UseCase::Chat),
+            "multimodal" | "vision" => Some(llmfit_x_core::models::UseCase::Multimodal),
+            "embedding" | "embed" => Some(llmfit_x_core::models::UseCase::Embedding),
+            "general" => Some(llmfit_x_core::models::UseCase::General),
             _ => None,
         };
         if let Some(target_uc) = target {
@@ -1546,19 +1553,19 @@ fn run_recommend(
                     "vision" => f
                         .model
                         .capabilities
-                        .contains(&llmfit_core::models::Capability::Vision),
+                        .contains(&llmfit_x_core::models::Capability::Vision),
                     "tool_use" | "tools" | "tool-use" | "function_calling" => f
                         .model
                         .capabilities
-                        .contains(&llmfit_core::models::Capability::ToolUse),
+                        .contains(&llmfit_x_core::models::Capability::ToolUse),
                     "audio" => f
                         .model
                         .capabilities
-                        .contains(&llmfit_core::models::Capability::Audio),
+                        .contains(&llmfit_x_core::models::Capability::Audio),
                     "tts" | "text-to-speech" | "text_to_speech" => f
                         .model
                         .capabilities
-                        .contains(&llmfit_core::models::Capability::Tts),
+                        .contains(&llmfit_x_core::models::Capability::Tts),
                     _ => false,
                 })
             });
@@ -1567,10 +1574,10 @@ fn run_recommend(
 
     // Filter by license if specified
     if let Some(ref lic_str) = license {
-        fits.retain(|f| llmfit_core::models::matches_license_filter(&f.model.license, lic_str));
+        fits.retain(|f| llmfit_x_core::models::matches_license_filter(&f.model.license, lic_str));
     }
 
-    fits = llmfit_core::fit::rank_models_by_fit(fits);
+    fits = llmfit_x_core::fit::rank_models_by_fit(fits);
     fits.truncate(limit);
 
     if csv {
@@ -1597,7 +1604,7 @@ fn run_download(
     output_dir: Option<&std::path::Path>,
     overrides: &HardwareOverrides,
 ) {
-    use llmfit_core::providers::LlamaCppProvider;
+    use llmfit_x_core::providers::LlamaCppProvider;
 
     let mut provider = LlamaCppProvider::new();
     if let Some(dir) = output_dir {
@@ -1621,7 +1628,7 @@ fn run_download(
     // Resolve repo ID: try known mapping, then treat as repo, then search
     let repo_id = if model.contains('/') {
         model.to_string()
-    } else if let Some(repo) = llmfit_core::providers::gguf_pull_tag(model) {
+    } else if let Some(repo) = llmfit_x_core::providers::gguf_pull_tag(model) {
         repo
     } else {
         // Search HuggingFace
@@ -1731,7 +1738,7 @@ fn run_download(
     // here so we can show the user the full size and part count up front.
     // The actual download is still driven by `download_gguf`, which performs
     // the same expansion internally.
-    let shard_set = llmfit_core::providers::collect_shard_set(&files, &filename);
+    let shard_set = llmfit_x_core::providers::collect_shard_set(&files, &filename);
     let (display_name, display_size) = if let Some(ref shards) = shard_set {
         let total: u64 = shards.iter().map(|(_, s)| *s).sum();
         let first = shards[0].0.clone();
@@ -1766,7 +1773,7 @@ fn run_download(
             // Poll for progress
             loop {
                 match handle.receiver.recv() {
-                    Ok(llmfit_core::providers::PullEvent::Progress { status, percent }) => {
+                    Ok(llmfit_x_core::providers::PullEvent::Progress { status, percent }) => {
                         if let Some(p) = percent {
                             print!("\r\x1b[K  {:.1}% - {}", p, status);
                             use std::io::Write;
@@ -1775,7 +1782,7 @@ fn run_download(
                             println!("  {}", status);
                         }
                     }
-                    Ok(llmfit_core::providers::PullEvent::Done) => {
+                    Ok(llmfit_x_core::providers::PullEvent::Done) => {
                         println!("\n\n✓ Download complete!");
                         // For sharded models, point at the first shard;
                         // llama.cpp auto-loads the rest from the same dir.
@@ -1823,7 +1830,7 @@ fn run_download(
                         }
                         break;
                     }
-                    Ok(llmfit_core::providers::PullEvent::Error(e)) => {
+                    Ok(llmfit_x_core::providers::PullEvent::Error(e)) => {
                         eprintln!("\n\n✗ Download failed: {}", e);
                         std::process::exit(1);
                     }
@@ -1842,7 +1849,7 @@ fn run_download(
 }
 
 fn run_update(trending: usize, downloads: usize, token: Option<String>, status: bool, clear: bool) {
-    use llmfit_core::update;
+    use llmfit_x_core::update;
 
     // ── --status ──────────────────────────────────────────────────────────
     if status {
@@ -1930,7 +1937,7 @@ fn run_update(trending: usize, downloads: usize, token: Option<String>, status: 
 }
 
 fn run_hf_search(query: &str, limit: usize) {
-    use llmfit_core::providers::LlamaCppProvider;
+    use llmfit_x_core::providers::LlamaCppProvider;
 
     println!(
         "Searching HuggingFace for GGUF models matching '{}'...\n",
@@ -1954,7 +1961,7 @@ fn run_hf_search(query: &str, limit: usize) {
 }
 
 fn run_model(model: &str, server: bool, port: u16, ngl: i32, ctx_size: u32) {
-    use llmfit_core::providers::LlamaCppProvider;
+    use llmfit_x_core::providers::LlamaCppProvider;
 
     let provider = LlamaCppProvider::new();
 
@@ -2058,7 +2065,7 @@ fn run_model(model: &str, server: bool, port: u16, ngl: i32, ctx_size: u32) {
 /// A plan target resolved either from the embedded catalog or from real
 /// introspected GGUF metadata (local file, HF repo id, or https URL).
 struct PlanModel {
-    model: llmfit_core::models::LlmModel,
+    model: llmfit_x_core::models::LlmModel,
     /// `-hf owner/repo:quant` or `-m <path>` fragment for the generated
     /// command; empty when no concrete artifact is known.
     model_ref: String,
@@ -2081,7 +2088,7 @@ fn gguf_variant_from_filename(filename: &str) -> Option<String> {
         None => stem,
     };
     let variant = without_shard.rsplit('-').next()?;
-    llmfit_core::plan::normalize_quant(variant)
+    llmfit_x_core::plan::normalize_quant(variant)
 }
 
 /// Resolve a plan target. Catalog entries win when the selector matches one;
@@ -2125,9 +2132,9 @@ fn resolve_plan_model(selector: &str, quant: Option<&str>) -> Result<PlanModel, 
 }
 
 fn catalog_exact_match(
-    models: &[llmfit_core::models::LlmModel],
+    models: &[llmfit_x_core::models::LlmModel],
     selector: &str,
-) -> Option<llmfit_core::models::LlmModel> {
+) -> Option<llmfit_x_core::models::LlmModel> {
     let needle = selector.trim().to_lowercase();
     if needle.is_empty() {
         return None;
@@ -2141,13 +2148,13 @@ fn catalog_exact_match(
 /// Wrap a catalog model into a PlanModel, deriving `-hf repo:quant` from its
 /// known GGUF sources when available.
 fn catalog_plan_model(
-    model: llmfit_core::models::LlmModel,
+    model: llmfit_x_core::models::LlmModel,
     quant: Option<&str>,
 ) -> Result<PlanModel, String> {
     let requested = quant
         .map(str::to_string)
         .unwrap_or_else(|| model.quantization.clone());
-    let normalized = llmfit_core::plan::normalize_quant(&requested).unwrap_or(requested);
+    let normalized = llmfit_x_core::plan::normalize_quant(&requested).unwrap_or(requested);
     let model_ref = model
         .gguf_sources
         .first()
@@ -2176,8 +2183,8 @@ fn introspect_plan_model(
     }
 
     let (display_name, summary, source_filename) = if std::path::Path::new(selector).exists() {
-        let file = llmfit_core::gguf::GgufFile::open(std::path::Path::new(selector))?;
-        let summary = llmfit_core::gguf::GgufModelSummary::from_header(&file.header);
+        let file = llmfit_x_core::gguf::GgufFile::open(std::path::Path::new(selector))?;
+        let summary = llmfit_x_core::gguf::GgufModelSummary::from_header(&file.header);
         let stem = file
             .path
             .file_stem()
@@ -2190,10 +2197,10 @@ fn introspect_plan_model(
             selector.to_string()
         } else {
             let (_filename, url, _size) =
-                llmfit_core::remote::resolve_repo_gguf_url(selector, quant)?;
+                llmfit_x_core::remote::resolve_repo_gguf_url(selector, quant)?;
             url
         };
-        let remote_gguf = llmfit_core::remote::open_remote_gguf(&url)?;
+        let remote_gguf = llmfit_x_core::remote::open_remote_gguf(&url)?;
         let summary = remote_gguf.summarize();
         let filename = url
             .rsplit('/')
@@ -2221,7 +2228,7 @@ fn introspect_plan_model(
         _ => summary,
     };
 
-    let model = llmfit_core::models::LlmModel::from_gguf_summary(&summary, &display_name);
+    let model = llmfit_x_core::models::LlmModel::from_gguf_summary(&summary, &display_name);
     let expert_bytes_per_layer_gb = match summary.block_count {
         Some(layers) if layers > 0 && summary.components.routed_experts > 0 => {
             Some(summary.components.routed_experts as f64 / layers as f64 / GIB)
@@ -2258,7 +2265,7 @@ fn build_plan_model_ref(
     } else {
         // Repo id; pick the variant from --quant or the resolved filename.
         let variant = quant
-            .map(llmfit_core::plan::normalize_quant)
+            .map(llmfit_x_core::plan::normalize_quant)
             .unwrap_or_else(|| gguf_variant_from_filename(selector));
         match variant {
             Some(v) => format!("-hf {selector}:{v}"),
@@ -2269,11 +2276,11 @@ fn build_plan_model_ref(
 
 fn run_audit(path: &str, quant: Option<&str>, json: bool) -> Result<(), String> {
     use display::{FileSection, GgufAuditView};
-    use llmfit_core::remote;
+    use llmfit_x_core::remote;
 
     let view = if std::path::Path::new(path).exists() {
-        let file = llmfit_core::gguf::GgufFile::open(std::path::Path::new(path))?;
-        let summary = llmfit_core::gguf::GgufModelSummary::from_header(&file.header);
+        let file = llmfit_x_core::gguf::GgufFile::open(std::path::Path::new(path))?;
+        let summary = llmfit_x_core::gguf::GgufModelSummary::from_header(&file.header);
         GgufAuditView {
             file_section: FileSection::Local {
                 path: file.path.display().to_string(),
@@ -2334,7 +2341,7 @@ fn run_plan(
     let model = &pm.model;
 
     let kv_quant = match kv_quant {
-        Some(s) => Some(llmfit_core::models::KvQuant::parse(&s).ok_or_else(|| {
+        Some(s) => Some(llmfit_x_core::models::KvQuant::parse(&s).ok_or_else(|| {
             format!(
                 "Unsupported --kv-quant '{}'. Valid: fp16, fp8, q8_0, q4_0, tq",
                 s
@@ -2343,7 +2350,7 @@ fn run_plan(
         None => None,
     };
 
-    if kv_quant == Some(llmfit_core::models::KvQuant::TurboQuant) {
+    if kv_quant == Some(llmfit_x_core::models::KvQuant::TurboQuant) {
         eprintln!(
             "warning: TurboQuant is experimental, not in upstream vLLM yet. \
              See https://github.com/0xSero/turboquant for the research integration. \
@@ -2359,15 +2366,15 @@ fn run_plan(
         kv_quant,
     };
     // Use default CalcConfig; serving flags not exposed via CLI yet.
-    let config = llmfit_core::fit::CalcConfig::default();
+    let config = llmfit_x_core::fit::CalcConfig::default();
     let mut plan =
-        llmfit_core::plan::estimate_model_plan_with_config(model, &request, &specs, &config)?;
+        llmfit_x_core::plan::estimate_model_plan_with_config(model, &request, &specs, &config)?;
     // No honest command exists when nothing fits: emitting `-ngl` numbers
     // for a machine that cannot hold the model would just produce an OOM.
-    plan.llamacpp_command = if plan.current.fit_level == llmfit_core::fit::FitLevel::TooTight {
+    plan.llamacpp_command = if plan.current.fit_level == llmfit_x_core::fit::FitLevel::TooTight {
         None
     } else {
-        llmfit_core::plan::llamacpp_server_command(
+        llmfit_x_core::plan::llamacpp_server_command(
             model,
             &plan,
             &specs,
@@ -3148,7 +3155,7 @@ fn main() {
             Commands::Doctor => {
                 print!(
                     "{}",
-                    llmfit_core::doctor::collect_diagnostics(env!("CARGO_PKG_VERSION"))
+                    llmfit_x_core::doctor::collect_diagnostics(env!("CARGO_PKG_VERSION"))
                 );
             }
 
@@ -3162,7 +3169,7 @@ fn main() {
                 name,
             } => {
                 let db = ModelDatabase::new();
-                let target = llmfit_core::claim::ClaimTarget {
+                let target = llmfit_x_core::claim::ClaimTarget {
                     min_tps,
                     efficiency_pct: efficiency,
                     device_class,
@@ -3172,9 +3179,9 @@ fn main() {
                 };
                 let rendered = resolve_model_selector(db.get_all_models(), &model).and_then(|m| {
                     if cli.json {
-                        llmfit_core::claim::render_json(m, &target, env!("CARGO_PKG_VERSION"))
+                        llmfit_x_core::claim::render_json(m, &target, env!("CARGO_PKG_VERSION"))
                     } else {
-                        llmfit_core::claim::render(m, &target)
+                        llmfit_x_core::claim::render(m, &target)
                     }
                 });
                 match rendered {
@@ -3230,7 +3237,7 @@ fn main() {
                 let results = db.find_model(&query);
                 if results.is_empty() {
                     // Fallback: search HuggingFace directly for GGUF models
-                    use llmfit_core::providers::LlamaCppProvider;
+                    use llmfit_x_core::providers::LlamaCppProvider;
                     println!(
                         "\nNo local models found matching '{}'. Searching HuggingFace...\n",
                         query
@@ -3269,7 +3276,7 @@ fn main() {
 
                 let mut fit =
                     ModelFit::analyze_with_context_limit(&models[idx], &specs, context_limit);
-                fit.measured_tps = llmfit_core::benchmarks::measured_tps_for(
+                fit.measured_tps = llmfit_x_core::benchmarks::measured_tps_for(
                     &specs,
                     &fit.model.name,
                     &fit.best_quant,
@@ -3519,8 +3526,8 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use llmfit_core::fit::{FitLevel, InferenceRuntime, RunMode, ScoreComponents};
-    use llmfit_core::models::LlmModel;
+    use llmfit_x_core::fit::{FitLevel, InferenceRuntime, RunMode, ScoreComponents};
+    use llmfit_x_core::models::LlmModel;
 
     fn mock_fit(name: &str, fit_level: FitLevel) -> ModelFit {
         ModelFit {
@@ -3543,7 +3550,7 @@ mod tests {
                 gguf_sources: vec![],
                 capabilities: vec![],
                 languages: vec![],
-                format: llmfit_core::models::ModelFormat::default(),
+                format: llmfit_x_core::models::ModelFormat::default(),
                 num_attention_heads: None,
                 num_key_value_heads: None,
                 num_hidden_layers: None,
@@ -3580,7 +3587,7 @@ mod tests {
             },
             estimated_tps: 30.0,
             best_quant: "Q4_K_M".to_string(),
-            use_case: llmfit_core::models::UseCase::General,
+            use_case: llmfit_x_core::models::UseCase::General,
             runtime: InferenceRuntime::LlamaCpp,
             installed: false,
             fits_with_turboquant: false,
@@ -3644,7 +3651,7 @@ mod tests {
                 gguf_sources: vec![],
                 capabilities: vec![],
                 languages: vec![],
-                format: llmfit_core::models::ModelFormat::default(),
+                format: llmfit_x_core::models::ModelFormat::default(),
                 num_attention_heads: None,
                 num_key_value_heads: None,
                 num_hidden_layers: None,
@@ -3682,7 +3689,7 @@ mod tests {
                 gguf_sources: vec![],
                 capabilities: vec![],
                 languages: vec![],
-                format: llmfit_core::models::ModelFormat::default(),
+                format: llmfit_x_core::models::ModelFormat::default(),
                 num_attention_heads: None,
                 num_key_value_heads: None,
                 num_hidden_layers: None,

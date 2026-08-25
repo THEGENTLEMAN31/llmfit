@@ -1,4 +1,4 @@
-use llmfit_core::{ModelDatabase, ModelFormat};
+use llmfit_x_core::{ModelDatabase, ModelFormat};
 
 const CORE_ONNX_MODELS_JSON: &str = include_str!("../data/onnx_models.json");
 const ROOT_ONNX_MODELS_JSON: &str = include_str!("../../data/onnx_models.json");

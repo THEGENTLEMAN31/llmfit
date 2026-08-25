@@ -33,7 +33,7 @@ impl DownloadHistory {
     fn config_path() -> Option<PathBuf> {
         Some(
             dirs::config_dir()?
-                .join("llmfit")
+                .join("llmfit-x")
                 .join("download_history.json"),
         )
     }

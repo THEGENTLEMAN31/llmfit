@@ -1515,7 +1515,7 @@ pub fn llamacpp_models_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("LLMFIT_MODELS_DIR") {
         PathBuf::from(dir)
     } else if let Some(cache) = dirs::cache_dir() {
-        cache.join("llmfit").join("models")
+        cache.join("llmfit-x").join("models")
     } else {
         PathBuf::from(".llmfit").join("models")
     }

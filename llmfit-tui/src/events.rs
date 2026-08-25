@@ -1,4 +1,4 @@
-use llmfit_core::hardware::SystemSpecs;
+use llmfit_x_core::hardware::SystemSpecs;
 use serde::Serialize;
 use std::sync::Arc;
 

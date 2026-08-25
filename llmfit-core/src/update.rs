@@ -47,7 +47,7 @@ struct CacheEnvelope {
 /// Returns the llmfit data directory.
 /// Uses the platform-appropriate data directory via the `dirs` crate.
 pub fn cache_dir() -> Option<PathBuf> {
-    Some(dirs::data_dir()?.join("llmfit"))
+    Some(dirs::data_dir()?.join("llmfit-x"))
 }
 
 /// Full path to the cached model list JSON file.

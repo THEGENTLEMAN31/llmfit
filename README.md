@@ -1,206 +1,122 @@
 # llmfit
 
 <p align="center">
-  <img src="assets/icon.svg" alt="llmfit icon" width="128" height="128">
+  <img src="https://img.shields.io/badge/rust-1.85+-orange?logo=rust" alt="Rust version">
+  <img src="https://img.shields.io/badge/version-1.1.10-blue" alt="Version">
+  <img src="https://img.shields.io/badge/license-MIT-green" alt="License">
+  <img src="https://img.shields.io/github/actions/workflow/status/THEGENTLEMAN31/llmfit/release.yml?label=build" alt="Build">
+  <img src="https://img.shields.io/github/actions/workflow/status/THEGENTLEMAN31/llmfit/docker.yml?label=docker" alt="Docker">
+  <img src="https://img.shields.io/crates/v/llmfit?label=crates.io" alt="crates.io">
+  <img src="https://img.shields.io/github/v/release/THEGENTLEMAN31/llmfit?label=release" alt="release">
 </p>
 
 <p align="center">
-  <b>English</b> ·
-  <a href="README.zh.md">中文</a> ·
-  <a href="README.ja.md">日本語</a>
+  <b>Right-size LLM models to your system's hardware</b><br>
+  Auto-detects CPU/RAM/GPU → scores 11k+ models → recommends what fits & runs fast
 </p>
-
-<p align="center">
-  <a href="https://github.com/AlexsJones/llmfit/actions/workflows/ci.yml"><img src="https://github.com/AlexsJones/llmfit/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="https://crates.io/crates/llmfit"><img src="https://img.shields.io/crates/v/llmfit.svg" alt="Crates.io"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License"></a>
-  <a href="https://about.signpath.io"><img src="https://img.shields.io/badge/SignPath-signed-brightgreen?logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxNiIgaGVpZ2h0PSIxNiIgZmlsbD0id2hpdGUiIHZpZXdCb3g9IjAgMCAxNiAxNiI+PHBhdGggZD0iTTEwLjA2NyA0LjU2N2wtNC43MzQgNC43MzMtMS40LTEuNGExIDEgMCAwIDAtMS40MTQgMS40MTRsMi4xIDIuMWExIDEgMCAwIDAgMS40MTQgMGw1LjQ0LTUuNDRhMSAxIDAgMCAwLTEuNDE0LTEuNDE0eiIvPjwvc3ZnPg==" alt="Signed with SignPath"></a>
-</p>
-
-> **📊 New: benchmark & share — real numbers from your machine, better estimates for everyone.** Download a model, serve it, and measure real tok/s on your hardware — then contribute the results back to the project as a PR, straight from the TUI. No `gh` CLI, no third-party account. Every run is saved locally first, your own measurements replace estimates in the fit table, and each merged submission ships in the next release: anyone on identical hardware gets measured `✓` numbers before they ever run a benchmark. [Follow the step-by-step benchmarking guide →](docs/benchmarking.md)
->
-> *Previously: [llmfit 1.0 — the release where the numbers became verifiable →](https://github.com/AlexsJones/llmfit/discussions/708)*
-
-**Hundreds of models & providers. One command to find what runs on your hardware.**
-
-A terminal tool that right-sizes LLM models to your system's RAM, CPU, and GPU. Detects your hardware, scores each model across quality, speed, fit, and context dimensions, and tells you which ones will actually run well on your machine.
-
-Ships with an interactive TUI (default) and a classic CLI mode. Supports multi-GPU setups, MoE architectures, dynamic quantization selection, speed estimation, and local runtime providers (Ollama, llama.cpp, MLX, Docker Model Runner, LM Studio).
-
-> **Sister projects:**
-> - [sympozium](https://github.com/sympozium-ai/sympozium/) — managing agents in Kubernetes.
-> - [llmserve](https://github.com/AlexsJones/llmserve) — a simple TUI for serving local LLM models. Pick a model, pick a backend, serve it.
-> - [llama-panel](https://github.com/AlexsJones/llama-panel) — a native macOS app for managing local llama-server instances.
-
-![demo](assets/demo.gif)
-
-## Documentation
-
-|  |  |
-|---|---|
-| **Get started** | [Install](#install) · [Usage](#usage) · [How it works](#how-it-works) |
-| **Guides** | [TUI guide](docs/tui.md) · [Benchmarking step-by-step](docs/benchmarking.md) · [CLI & automation](docs/cli.md) · [Runtime providers](docs/providers.md) · [OpenClaw integration](docs/openclaw.md) |
-| **Reference** | [How it works (full)](docs/how-it-works.md) · [Platform & GPU support](docs/platform-support.md) · [Custom models](docs/custom-models.md) · [Development](docs/development.md) |
-| **Project** | [Contributing](#contributing) · [Alternatives](#alternatives) · [Code signing](#code-signing) · [License](#license) |
 
 ---
 
-## Install
+## ✨ Features
 
-### Windows
-```sh
-scoop install llmfit
+- 🔍 **Auto-detection**: CPU, RAM, GPU (NVIDIA/AMD/Apple Silicon), PCIe, NVLink
+- 📊 **Multi-objective scoring**: Quality + Speed + VRAM fit + Context + Energy + Cost
+- ⚡ **Live calibration**: Community benchmarks → your hardware
+- 📋 **Hardware plans**: llama.cpp / vLLM commands with `-ngl`, `--n-cpu-moe`, TP
+- 🌐 **Dashboard**: Web UI + CLI + REST API + TUI
+- 📦 **Model catalog**: 11k+ models from HF + GGUF introspection
+
+## 🚀 Quick Start
+
+```bash
+# Install (choose one)
+cargo install llmfit                    # crates.io
+brew install THEGENTLEMAN31/tap/llmfit  # Homebrew
+docker run ghcr.io/thegentleman31/llmfit  # Docker
+# or download binary from GitHub Releases
+
+# Detect hardware & find models
+llmfit system          # Show hardware specs
+llmfit fit --perfect -n 10   # Top 10 perfect-fit models
+llmfit fit --use-case coding -n 10  # Coding models
+
+# Plan hardware for a specific model
+llmfit plan "Qwen/Qwen2.5-7B-Instruct" --context 8192
+
+# Web dashboard
+llmfit serve  # or: cd llmfit-web && npx vite dev
 ```
 
-If Scoop is not installed, follow the [Scoop installation guide](https://scoop.sh/).
+## 📊 Example Output
 
-### macOS / Linux
+```
+$ llmfit fit --perfect -n 3
 
-#### Homebrew
+=== System Specifications ===
+CPU: Intel i5-10200H (8 cores)
+RAM: 38.9 GB (avail 19.2 GB)
+GPU: NVIDIA RTX 3050 Laptop (4.0 GB VRAM)
 
-Prebuilt binary (recommended, works on all macOS/Linux versions):
-```sh
-brew install AlexsJones/llmfit/llmfit
+╭─────────┬────────────────────────────┬────────┬──────┬───────┬─────────┬───────────┬────────┬──────┬───────┐
+│ Status  │ Model                      │ Provider │ Size │ Score │ tok/s   │ Quant     │ Runtime │ Mode │ Mem % │
+├─────────┼────────────────────────────┼──────────┼──────┼───────┼─────────┼───────────┼─────────┼──────┼───────┤
+│ 🟢      │ Qwen2.5-Coder-3B-AWQ       │ Alibaba  │ 3.4B │ 85    │ 85.5    │ AWQ-4bit  │ vLLM    │ GPU  │ 62%   │
+│ 🟢      │ Qwen2.5-3B-AWQ             │ Alibaba  │ 3.4B │ 85    │ 85.5    │ AWQ-4bit  │ vLLM    │ GPU  │ 62%   │
+│ 🟢      │ Qwen2.5-3B-GPTQ-Int4       │ Alibaba  │ 3.1B │ 85    │ 94.1    │ GPTQ-Int4 │ vLLM    │ GPU  │ 58%   │
+╰─────────┴────────────────────────────┴──────────┴──────┴───────┴─────────┴───────────┴─────────┴──────┴───────┘
 ```
 
-Or from the homebrew-core formula, which builds from source on macOS versions without a bottle:
-```sh
-brew install llmfit
+## 🎯 Use Cases
+
+| Use Case | Command |
+|----------|---------|
+| **Coding assistant** | `llmfit fit --use-case coding --perfect -n 5` |
+| **Chat/Chatbot** | `llmfit fit --use-case chat -n 10` |
+| **Reasoning/Logic** | `llmfit fit --use-case reasoning --perfect` |
+| **Local LLM server** | `llmfit serve --host 0.0.0.0 --port 8787` |
+| **Benchmark** | `llmfit bench --model "Qwen2.5-7B" --runtime llamacpp` |
+
+## 🐳 Docker
+
+```bash
+docker run --gpus all -p 8787:8787 ghcr.io/thegentleman31/llmfit serve --host 0.0.0.0
+# Web dashboard: http://localhost:8787
 ```
 
-#### MacPorts
-```sh
-port install llmfit
+## 🛠 Installation
+
+| Method | Command |
+|--------|---------|
+| **Cargo** | `cargo install llmfit` |
+| **Homebrew** | `brew install THEGENTLEMAN31/tap/llmfit` |
+| **Docker** | `docker run ghcr.io/thegentleman31/llmfit` |
+| **Binary** | [GitHub Releases](https://github.com/THEGENTLEMAN31/llmfit/releases) |
+
+### Cargo Features
+```bash
+cargo install llmfit --features "web,bench"  # Optional features
 ```
 
-#### Quick install
-```sh
-curl -fsSL https://llmfit.axjns.dev/install.sh | sh
-```
+## 🏗 Building from Source
 
-Downloads the latest release binary from GitHub and installs it to `/usr/local/bin` (or `~/.local/bin` if no sudo).
-
-**Install to `~/.local/bin` without sudo:**
-```sh
-curl -fsSL https://llmfit.axjns.dev/install.sh | sh -s -- --local
-```
-
-### uv / pip
-To install or update llmfit:
-```sh
-uv tool install -U llmfit
-```
-
-To run without installing:
-```sh
-uvx llmfit
-```
-
-You can also install llmfit as a Python package in the normal way with tools such as pip or uv.
-
-### Docker / Podman
-```sh
-docker run ghcr.io/alexsjones/llmfit
-```
-This prints JSON from `llmfit recommend` command. The JSON could be further queried with `jq`.
-```
-podman run ghcr.io/alexsjones/llmfit recommend --use-case coding | jq '.models[].name'
-```
-To launch the interactive TUI instead, pass the global `--tui` flag:
-```sh
-docker run --rm -it ghcr.io/alexsjones/llmfit --tui
-```
-
-### From source
-```sh
-git clone https://github.com/AlexsJones/llmfit.git
+```bash
+git clone https://github.com/THEGENTLEMAN31/llmfit
 cd llmfit
 cargo build --release
-# binary is at target/release/llmfit
+./target/release/llmfit --help
 ```
 
----
+## 🤝 Contributing
 
-## Usage
+See [CONTRIBUTING.md](CONTRIBUTING.md) - PRs welcome!
 
-```sh
-llmfit          # interactive TUI: your hardware, every model, ranked
-```
+## 📄 License
 
-The TUI shows your detected specs at the top and every model scored for fit, speed, quality, and context. See the [TUI guide](docs/tui.md) for navigation, planning, simulation, downloads, the community leaderboard, and benchmarking.
+MIT License - see [LICENSE](LICENSE)
 
-For scripts, agents, and classic terminal output:
+## 🙏 Acknowledgments
 
-```sh
-llmfit fit                    # table of all models ranked by fit
-llmfit recommend --json       # top picks as JSON (agent/script consumption)
-llmfit info "<model>"         # one model: fit analysis, estimate basis, verify commands
-llmfit bench                  # measure real tok/s/TTFT against your running provider
-llmfit doctor                 # hardware detection report for bug reports
-```
-
-### Introspection: plan any GGUF, not just catalog entries
-
-`plan` and `audit` read real GGUF headers — locally or straight from HuggingFace via HTTP range requests (a few MB of metadata, never the weights):
-
-```sh
-llmfit audit ./model-Q4_K_M.gguf                       # exact quant mix, experts, context, per-block types
-llmfit audit Qwen/Qwen3-235B-A22B-GGUF --quant Q4_K_M  # same, remote: repo id resolved to the best file
-llmfit audit https://.../model.gguf                    # same, direct URL
-
-# Plan on introspected data + get a ready-to-run llama.cpp command:
-llmfit --memory 24G --ram 192G plan Qwen/Qwen3-235B-A22B-GGUF --quant Q4_K_M --context 16384
-# → llama-server -hf Qwen/Qwen3-235B-A22B-GGUF:Q4_K_M -c 16384 -fa -ngl 99 --n-cpu-moe N
-```
-
-The suggested `--n-cpu-moe N` comes from the audited expert tensor sizes and your VRAM budget, not from filename heuristics; sharded models are detected and rescaled to the full set. When nothing fits, llmfit says so instead of printing a command that would OOM. Full method: [FORK_GUIDE.md](FORK_GUIDE.md).
-
-Full reference: [CLI & automation](docs/cli.md).
-
----
-
-## How it works
-
-llmfit detects your hardware (RAM, CPU, GPU/VRAM, backend), then scores every model in its catalog across four dimensions: memory fit, estimated speed, quality, and context. Speed estimates come from a memory-bandwidth model grounded in runtime sampling and real community measurements — and every estimate ships its inputs, so `llmfit info` shows exactly what a number assumes and how to verify it on your machine.
-
-Full detail, including the estimation formulas and the model database: [How llmfit works](docs/how-it-works.md).
-
----
-
-## Contributing
-
-Contributions are welcome, especially new models.
-
-### Before submitting a PR
-
-Please run `cargo fmt` before pushing your changes. Most CI check failures are caused by unformatted code:
-
-```sh
-cargo fmt
-```
-
-Guides for adding models — locally (no rebuild) or to the built-in catalog: [Custom models](docs/custom-models.md).
-
----
-
-## Alternatives
-
-If you're looking for a different approach, check out [llm-checker](https://github.com/Pavelevich/llm-checker) -- a Node.js CLI tool with Ollama integration that can pull and benchmark models directly. It takes a more hands-on approach by actually running models on your hardware via Ollama, rather than estimating from specs. Good if you already have Ollama installed and want to test real-world performance. Note that it doesn't support MoE (Mixture-of-Experts) architectures -- all models are treated as dense, so memory estimates for models like Mixtral or DeepSeek-V3 will reflect total parameter count rather than the smaller active subset.
-
----
-
-## Code signing
-
-llmfit's Windows release binaries are digitally signed (Authenticode) via [SignPath.io](https://about.signpath.io/), with a free code signing certificate provided by the [SignPath Foundation](https://signpath.org/).
-
-Signing happens automatically in the [release pipeline](.github/workflows/release.yml): only artifacts built by GitHub Actions from this repository are submitted for signing, and signing requests are approved by the project maintainer ([@AlexsJones](https://github.com/AlexsJones)).
-
-**Code signing policy:** see the [SignPath Foundation code signing policy and terms](https://signpath.org/terms).
-
-**Privacy:** this program will not transfer any information to other networked systems unless specifically requested by the user or the person installing or operating it. llmfit only contacts external services when you explicitly use the corresponding feature (e.g. model downloads, runtime provider queries, or the community leaderboard).
-
----
-
-## License
-
-MIT
+- [llama.cpp](https://github.com/ggerganov/llama.cpp) - inference engine
+- [gguf](https://github.com/ggerganov/ggml) - model format
+- [localmaxxing.com](https://localmaxxing.com) - community benchmarks
+- All model authors on HuggingFace

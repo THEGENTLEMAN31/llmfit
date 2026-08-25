@@ -42,7 +42,7 @@ pub struct FilterConfig {
 impl FilterConfig {
     /// Path to the config file: `~/.config/llmfit/filters.json`
     fn config_path() -> Option<PathBuf> {
-        Some(dirs::config_dir()?.join("llmfit").join("filters.json"))
+        Some(dirs::config_dir()?.join("llmfit-x").join("filters.json"))
     }
 
     /// Load the saved filter config from disk, falling back to defaults.

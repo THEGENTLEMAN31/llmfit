@@ -1,0 +1,68 @@
+name: Bug Report
+description: Report a bug
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: "Thanks for reporting! Please fill out the sections below."
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `llmfit --version`
+      placeholder: "1.1.10"
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating System
+      options:
+        - Linux (specify distro)
+        - macOS (specify version)
+        - Windows (specify version)
+    validations:
+      required: true
+  - type: dropdown
+    id: hardware
+    attributes:
+      label: Hardware
+      options:
+        - NVIDIA GPU (specify model)
+        - AMD GPU (specify model)
+        - Apple Silicon (specify chip)
+        - Intel/AMD CPU only
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: Clear description of the bug
+      placeholder: "When I run..."
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to Reproduce
+      placeholder: |
+        1. Run `llmfit ...`
+        2. Observe...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+      placeholder: "What should happen?"
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / Output
+      description: Paste relevant logs (use code blocks)
+      render: text

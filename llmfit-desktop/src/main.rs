@@ -1,9 +1,9 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use llmfit_core::fit::{FitLevel, InferenceRuntime, ModelFit, RunMode};
-use llmfit_core::hardware::SystemSpecs;
-use llmfit_core::models::ModelDatabase;
-use llmfit_core::providers::{ModelProvider, OllamaProvider, PullEvent};
+use llmfit_x_core::fit::{FitLevel, InferenceRuntime, ModelFit, RunMode};
+use llmfit_x_core::hardware::SystemSpecs;
+use llmfit_x_core::models::ModelDatabase;
+use llmfit_x_core::providers::{ModelProvider, OllamaProvider, PullEvent};
 use serde::Serialize;
 use std::sync::Mutex;
 use tauri::State;
@@ -56,7 +56,7 @@ struct PullStatus {
 
 struct AppState {
     ollama: OllamaProvider,
-    pull_handle: Mutex<Option<llmfit_core::providers::PullHandle>>,
+    pull_handle: Mutex<Option<llmfit_x_core::providers::PullHandle>>,
 }
 
 #[tauri::command]
@@ -94,7 +94,7 @@ fn get_model_fits() -> Result<Vec<ModelFitInfo>, String> {
         .map(|m| ModelFit::analyze(m, &specs))
         .collect();
 
-    fits = llmfit_core::fit::rank_models_by_fit(fits);
+    fits = llmfit_x_core::fit::rank_models_by_fit(fits);
 
     Ok(fits
         .into_iter()

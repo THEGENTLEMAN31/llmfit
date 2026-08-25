@@ -17,8 +17,8 @@ use crate::tui_app::{
     DownloadProvider, FitFilter, InputMode, PlanField, SimulationField, matched_gguf_provider,
     provider_selected,
 };
-use llmfit_core::fit::{FitLevel, ModelFit, SortColumn};
-use llmfit_core::hardware::is_running_in_wsl;
+use llmfit_x_core::fit::{FitLevel, ModelFit, SortColumn};
+use llmfit_x_core::hardware::is_running_in_wsl;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
@@ -882,12 +882,12 @@ fn draw_table(frame: &mut Frame, app: &mut App, area: Rect, tc: &ThemeColors) {
             let color = fit_color(fit.fit_level, tc);
 
             let mode_color = match fit.run_mode {
-                llmfit_core::fit::RunMode::Gpu => tc.mode_gpu,
-                llmfit_core::fit::RunMode::TensorParallel => tc.mode_gpu,
-                llmfit_core::fit::RunMode::MoeOffload => tc.mode_moe,
-                llmfit_core::fit::RunMode::CpuOffload => tc.mode_offload,
-                llmfit_core::fit::RunMode::CpuOnly => tc.mode_cpu,
-                llmfit_core::fit::RunMode::Serving => tc.mode_gpu, // Serving runs on GPU
+                llmfit_x_core::fit::RunMode::Gpu => tc.mode_gpu,
+                llmfit_x_core::fit::RunMode::TensorParallel => tc.mode_gpu,
+                llmfit_x_core::fit::RunMode::MoeOffload => tc.mode_moe,
+                llmfit_x_core::fit::RunMode::CpuOffload => tc.mode_offload,
+                llmfit_x_core::fit::RunMode::CpuOnly => tc.mode_cpu,
+                llmfit_x_core::fit::RunMode::Serving => tc.mode_gpu, // Serving runs on GPU
             };
 
             let score_color = if fit.score >= 70.0 {
@@ -1322,7 +1322,7 @@ fn compare_badges(fit: &ModelFit) -> String {
     if fit.model.is_moe {
         tags.push("MoE");
     }
-    if fit.run_mode == llmfit_core::fit::RunMode::MoeOffload {
+    if fit.run_mode == llmfit_x_core::fit::RunMode::MoeOffload {
         tags.push("Offload");
     }
     if !fit.notes.is_empty() {
@@ -1645,12 +1645,12 @@ fn draw_multi_compare(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeColors
             .iter()
             .map(|m| {
                 let c = match m.run_mode {
-                    llmfit_core::fit::RunMode::Gpu => tc.mode_gpu,
-                    llmfit_core::fit::RunMode::TensorParallel => tc.mode_gpu,
-                    llmfit_core::fit::RunMode::MoeOffload => tc.mode_moe,
-                    llmfit_core::fit::RunMode::CpuOffload => tc.mode_offload,
-                    llmfit_core::fit::RunMode::CpuOnly => tc.mode_cpu,
-                    llmfit_core::fit::RunMode::Serving => tc.mode_gpu,
+                    llmfit_x_core::fit::RunMode::Gpu => tc.mode_gpu,
+                    llmfit_x_core::fit::RunMode::TensorParallel => tc.mode_gpu,
+                    llmfit_x_core::fit::RunMode::MoeOffload => tc.mode_moe,
+                    llmfit_x_core::fit::RunMode::CpuOffload => tc.mode_offload,
+                    llmfit_x_core::fit::RunMode::CpuOnly => tc.mode_cpu,
+                    llmfit_x_core::fit::RunMode::Serving => tc.mode_gpu,
                 };
                 Style::default().fg(c)
             })
@@ -1883,8 +1883,8 @@ fn draw_detail(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeColors) {
             Span::styled(
                 fit.runtime_text(),
                 Style::default().fg(match fit.runtime {
-                    llmfit_core::fit::InferenceRuntime::Mlx => tc.accent,
-                    llmfit_core::fit::InferenceRuntime::Vllm => tc.accent_secondary,
+                    llmfit_x_core::fit::InferenceRuntime::Mlx => tc.accent,
+                    llmfit_x_core::fit::InferenceRuntime::Vllm => tc.accent_secondary,
                     _ => tc.fg,
                 }),
             ),
@@ -1979,9 +1979,9 @@ fn draw_detail(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeColors) {
                         " {} ({})",
                         r,
                         match r.source {
-                            llmfit_core::fit::TpsRangeSource::CommunitySamples =>
+                            llmfit_x_core::fit::TpsRangeSource::CommunitySamples =>
                                 "community p10–p90",
-                            llmfit_core::fit::TpsRangeSource::EmpiricalBand =>
+                            llmfit_x_core::fit::TpsRangeSource::EmpiricalBand =>
                                 "±25% empirical band",
                         }
                     ),
@@ -2046,7 +2046,7 @@ fn draw_detail(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeColors) {
             ]));
         }
 
-        if fit.run_mode == llmfit_core::fit::RunMode::MoeOffload {
+        if fit.run_mode == llmfit_x_core::fit::RunMode::MoeOffload {
             lines.push(Line::from(vec![
                 Span::styled("  Strategy:    ", Style::default().fg(tc.muted)),
                 Span::styled(
@@ -2054,7 +2054,7 @@ fn draw_detail(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeColors) {
                     Style::default().fg(tc.good),
                 ),
             ]));
-        } else if fit.run_mode == llmfit_core::fit::RunMode::Gpu {
+        } else if fit.run_mode == llmfit_x_core::fit::RunMode::Gpu {
             lines.push(Line::from(vec![
                 Span::styled("  Strategy:    ", Style::default().fg(tc.muted)),
                 Span::styled(
@@ -4751,7 +4751,7 @@ fn draw_benchmarks(frame: &mut Frame, app: &mut App, area: Rect, tc: &ThemeColor
 }
 
 fn draw_bench_hw_picker(frame: &mut Frame, app: &App, tc: &ThemeColors) {
-    use llmfit_core::benchmarks::HardwarePreset;
+    use llmfit_x_core::benchmarks::HardwarePreset;
 
     let presets = HardwarePreset::all();
     let area = frame.area();
@@ -4801,7 +4801,7 @@ fn draw_bench_hw_picker(frame: &mut Frame, app: &App, tc: &ThemeColors) {
             )
         } else {
             let p = &presets[i - 1];
-            let label = match llmfit_core::benchmarks::cached_preset_benchmark_count(p.label) {
+            let label = match llmfit_x_core::benchmarks::cached_preset_benchmark_count(p.label) {
                 Some(1) => format!("{} (1 benchmark)", p.label),
                 Some(n) => format!("{} ({} benchmarks)", p.label, n),
                 None => p.label.to_string(),
@@ -5068,7 +5068,7 @@ fn bench_bar(score: f64, width: usize) -> String {
 }
 
 fn bench_get_role_quality(
-    results: &[llmfit_core::quality::ModelQualityResult],
+    results: &[llmfit_x_core::quality::ModelQualityResult],
     model: &str,
     role: &str,
 ) -> Option<f64> {
@@ -5452,7 +5452,7 @@ fn draw_bench(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeColors) {
                         let c_color = bench_score_color(rs.composite, tc);
                         let bar = bench_bar(rs.composite, 15);
 
-                        let role_tests: Vec<&llmfit_core::quality::QualityResult> = result
+                        let role_tests: Vec<&llmfit_x_core::quality::QualityResult> = result
                             .test_results
                             .iter()
                             .filter(|t| t.role == rs.role)
