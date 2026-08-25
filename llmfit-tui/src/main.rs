@@ -2068,7 +2068,7 @@ struct PlanModel {
 }
 
 /// Extract the quantization variant from a GGUF filename
-/// ("<Model>-<QUANT>[-NNNNN-of-MMMMM].gguf"), validated against the known
+/// (`"<Model>-<QUANT>[-NNNNN-of-MMMMM].gguf"`), validated against the known
 /// quant names so arbitrary model suffixes are never mistaken for one.
 fn gguf_variant_from_filename(filename: &str) -> Option<String> {
     let stem = filename.strip_suffix(".gguf")?;
