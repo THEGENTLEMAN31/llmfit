@@ -145,7 +145,7 @@ Légère divergence avec le rapport initial : **le HEAD actuel contient déjà d
 
 ### V3 « Économie & Écosystème »
 - [x] **V3-a Énergie/coût** : Wh/requête (TDP détecté × temps préfill+decode + idle), $/Mtok (prix élec paramétrable). Affiché en fourchette.
-- [x] **V3-b Ranking multi-objectifs** (qualité bpw ↓, tok/s ↑, marge VRAM, $/Mtok, Wh) + docs API lib publique + dashboard web à calibration live — ✅ **TERMINÉ** (commit <HASH>) : ScoreComponents étendu à 6 dimensions (quality, speed, fit, context, energy, cost) ; ScoringWeights étendu à 6 dimensions avec poids par use_case ; nouveaux scores energy_score() (Wh/token → 0-100, exp decay) et cost_score() ($/Mtok → 0-100, exp decay) ; compute_scores() et weighted_score() mis à jour pour 6 dimensions ; poids par défaut ajustés par use_case (General 0.35/0.25/0.10/0.10/0.10/0.10, Coding 0.40/0.15/0.10/0.10/0.15/0.10, etc.) ; weighted_score() mis à jour pour 6 composants ; compute_scores() ajoute energy_score() (Wh/tok via TDP GPU) et cost_score() ($/Mtok via prix élec) ; tests mis à jour (ScoreComponents avec energy/cost) ; tests verts.
+- [x] **V3-b Ranking multi-objectifs** (qualité bpw ↓, tok/s ↑, marge VRAM, $/Mtok, Wh) + docs API lib publique + dashboard web à calibration live — ✅ **TERMINÉ** (commit 68984f7) : ScoreComponents étendu à 6 dimensions (quality, speed, fit, context, energy, cost) ; ScoringWeights étendu à 6 dimensions avec poids par use_case ; nouveaux scores energy_score() (Wh/token → 0-100, exp decay) et cost_score() ($/Mtok → 0-100, exp decay) ; compute_scores() et weighted_score() mis à jour pour 6 dimensions ; poids par défaut ajustés par use_case (General 0.35/0.25/0.10/0.10/0.10/0.10, Coding 0.40/0.15/0.10/0.10/0.15/0.10, etc.) ; weighted_score() mis à jour pour 6 composants ; compute_scores() ajoute energy_score() (Wh/tok via TDP GPU) et cost_score() ($/Mtok via prix élec) ; tests mis à jour (ScoreComponents avec energy/cost) ; tests verts.
 - **Milestone V3 : tag `v3-economie` + push.**
 
 ## 5. Décisions d'architecture (log)
@@ -265,7 +265,7 @@ Légère divergence avec le rapport initial : **le HEAD actuel contient déjà d
 - Tests : workspace **746 verts** (baseline 734), clippy/fmt OK, sérialisation OK. +0 tests spécifiques (structure testée via compilation + fit existant).
 - **NEXT** : V2-e complet (branch-and-bound, Pareto, TP/PP réalistes, calibration conjointe) → tag `v2-placement`.
 
-### 2026-08-24 — Session 4 (suite 5) — ✅ V3-a TERMINÉ (commit <HASH>)
+### 2026-08-24 — Session 4 (suite 5) — ✅ V3-a TERMINÉ (commit 68984f7)
 - **TDP GPU** (hardware.rs) : nouvelle fonction `gpu_tdp_watts(name)` → lookup table (NVIDIA 50/40/30/20 series, AMD 7000/6000, Apple M1-M5, data center H100/A100/MI300). Remplissage automatique dans `GpuInfo.tdp_watts` lors de la détection (NVIDIA/AMD/Apple/Intel/Ascend). Valeur exposée dans `EstimateBasis` (sérialisation JSON auto via serve_shared).
 - **Estimation énergie** (fit.rs) : `energy_per_token_wh = TDP × (1/TPS) × 0.75 / 3600` (facteur utilisation 0.75, temps decode = 1/TPS). `energy_per_mtok_usd = Wh/tok × prix_élec ($/kWh) × 1000`. Paramètre `CalcConfig.electricity_price_usd_per_kwh` (défaut 0.15 $/kWh, surchargeable env `LLMFIT_ELECTRICITY_PRICE` / UI). Affiché dans `EstimateBasis` + ligne "Estimate Basis" CLI/TUI : "Energy: ~X Wh/token (~Y $/Mtok @ 0.15 $/kWh)".
 - **CalcConfig** : `electricity_price_usd_per_kwh: Option<f64>` (défaut 0.15, None = désactive affichage).
@@ -274,7 +274,7 @@ Légère divergence avec le rapport initial : **le HEAD actuel contient déjà d
 - **Tests** : mocks mis à jour (fit.rs, main.rs, tui_app.rs, display.rs). Workspace **746 verts** (baseline 734), clippy/fmt OK.
 - **NEXT** : V3-b (ranking multi-objectifs, API lib publique, dashboard live calibration).
 
-### 2026-08-24 — Session 4 (suite 6) — ✅ V3-b TERMINÉ (commit <HASH>)
+### 2026-08-24 — Session 4 (suite 6) — ✅ V3-b TERMINÉ (commit 68984f7)
 - **Scoring multi-objectif 6D** : ScoreComponents étendu (quality, speed, fit, context, energy, cost) ; ScoringWeights 6D (quality, speed, fit, context, energy, cost) avec poids par UseCase (General/Coding/Reasoning/Chat/Multimodal/Embedding). Poids par défaut ajustés : General [0.35/0.25/0.10/0.10/0.10/0.10], Coding [0.40/0.15/0.10/0.10/0.15/0.10], Reasoning [0.45/0.10/0.10/0.10/0.15/0.10], Chat [0.35/0.25/0.10/0.10/0.10/0.10], Multimodal [0.40/0.15/0.10/0.10/0.15/0.10], Embedding [0.25/0.30/0.15/0.10/0.10/0.10].
 - **Nouveaux scores** : energy_score() via TDP GPU (Wh/tok → 0-100, décroissance exp) ; cost_score() ($/Mtok via prix élec → 0-100, décroissance exp) ; intégrés dans compute_scores() avec system/config.
 - **Scoring 6D** : weighted_score() mis à jour pour 6 composants ; compute_scores() ajoute energy_score() (Wh/tok via TDP GPU) et cost_score() ($/Mtok via prix élec) ; weighted_score() utilise 6 poids.
